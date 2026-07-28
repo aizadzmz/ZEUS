@@ -1,10 +1,19 @@
 from typing import List, Optional, Tuple
 
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
 from core.io_utils import EISDataset
+
+# The gold crosshair marking Z'=0 and -Z''=0 on Nyquist plots, drawn heavier
+# than the grid so the origin reads as a reference the eye can find rather
+# than as another gridline. core.plotting_pg imports these, so both the
+# matplotlib and PyQtGraph backends stay in sync from one place.
+ORIGIN_COLOR = "#CC9D33"
+ORIGIN_WIDTH = 2.0
+
 
 def plot_single(
     dataset: EISDataset,
@@ -132,9 +141,7 @@ def plot_residuals(
 ) -> tuple[Figure, Axes]:
     """
     Plot the relative residuals (ΔZ'/|Z| and ΔZ''/|Z|, in percent) of a
-    validation result (Kramers-Kronig or Z-HIT) against frequency, with a
-    box plot summarizing each component: real on the left, imaginary on
-    the right. All three panels share the same y-scale.
+    validation result (Kramers-Kronig or Z-HIT) against frequency.
 
     Args:
         result    : A KramersKronigResult or ZHITResult (anything with
@@ -149,11 +156,7 @@ def plot_residuals(
     """
     freq, res_re, res_im = result.get_residuals_data()
 
-    fig = plt.figure(figsize=(9, 4), layout="constrained")
-    gs = fig.add_gridspec(1, 3, width_ratios=[1, 14, 1], wspace=0.08)
-    ax = fig.add_subplot(gs[1])
-    ax_re = fig.add_subplot(gs[0], sharey=ax)
-    ax_im = fig.add_subplot(gs[2], sharey=ax)
+    fig, ax = plt.subplots(figsize=(8, 4), layout="constrained")
 
     re_color, im_color = "C0", "C1"
 
@@ -165,35 +168,11 @@ def plot_residuals(
     ax.semilogx(freq, res_re, "o-", ms=4, color=re_color, label="ΔZ' / |Z|")
     ax.semilogx(freq, res_im, "s-", ms=4, color=im_color, label="ΔZ'' / |Z|")
     ax.set_xlabel("Frequency (Hz)", fontsize=10)
+    ax.set_ylabel("Relative residual (%)", fontsize=10)
     ax.grid(True, linestyle="--", alpha=0.5)
-    ax.tick_params(labelleft=False)
     if title:
         ax.set_title(title, fontsize=12)
     ax.legend(fontsize=8, loc="best")
-
-    for side_ax, values, color in (
-        (ax_re, res_re, re_color),
-        (ax_im, res_im, im_color),
-    ):
-        box = side_ax.boxplot(
-            values,
-            widths=0.5,
-            patch_artist=True,
-            flierprops=dict(marker="o", markersize=3, markerfacecolor=color,
-                            markeredgecolor=color),
-        )
-        box["boxes"][0].set(facecolor=color, alpha=0.35, edgecolor=color)
-        box["medians"][0].set(color=color, linewidth=1.5)
-        for part in ("whiskers", "caps"):
-            for line in box[part]:
-                line.set(color=color)
-        side_ax.set_xticks([])
-        side_ax.grid(True, axis="y", linestyle="--", alpha=0.5)
-
-    ax_re.set_ylabel("Relative residual (%)", fontsize=10)
-    ax_re.set_xlabel("Z'", fontsize=9, color=re_color)
-    ax_im.set_xlabel("Z''", fontsize=9, color=im_color)
-    ax_im.tick_params(labelleft=False)
 
     if save_path:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -237,13 +216,19 @@ def plot_drt(
         data = result.get_drt_data()
         if len(data) == 3:
             tau, gamma_re, gamma_im = data
-            ax.semilogx(tau, gamma_re, linewidth=1.5, label=f"{label} (Re)")
-            ax.semilogx(tau, gamma_im, linewidth=1.5, linestyle="--", label=f"{label} (Im)")
+            freq = 1.0 / (2.0 * np.pi * tau)
+            ax.semilogx(freq, gamma_re, linewidth=1.5, label=f"{label} (Re)")
+            ax.semilogx(freq, gamma_im, linewidth=1.5, linestyle="--", label=f"{label} (Im)")
         else:
             tau, gamma = data
-            ax.semilogx(tau, gamma, linewidth=1.5, label=label)
+            freq = 1.0 / (2.0 * np.pi * tau)
+            ax.semilogx(freq, gamma, linewidth=1.5, label=label)
 
-    ax.set_xlabel(r"$\tau$ (s)", fontsize=10)
+    # High frequency on the left, low frequency on the right, to match the
+    # Nyquist plot's orientation.
+    ax.invert_xaxis()
+
+    ax.set_xlabel("Frequency (Hz)", fontsize=10)
     ax.set_ylabel(r"$\gamma$ ($\Omega$)", fontsize=10)
     ax.set_title(title, fontsize=12)
     ax.grid(True, linestyle="--", alpha=0.5)
@@ -331,8 +316,8 @@ def _format_ax(ax: Axes) -> None:
     ax.set_ylim(ylo, yhi)
     ax.set_aspect("equal", adjustable="box")
 
-    ax.axhline(0, color="#CC9D33", linewidth=1, zorder=1)
-    ax.axvline(0, color="#CC9D33", linewidth=1, zorder=1)
+    ax.axhline(0, color=ORIGIN_COLOR, linewidth=ORIGIN_WIDTH, zorder=1)
+    ax.axvline(0, color=ORIGIN_COLOR, linewidth=ORIGIN_WIDTH, zorder=1)
 
     ax.legend(
         fontsize=9,

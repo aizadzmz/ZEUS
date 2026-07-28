@@ -4,9 +4,8 @@ Mirrors the Streamlit app's workflow (load -> select -> style -> filter ->
 validate) but with explicit event handling instead of rerun-everything.
 """
 
-from functools import partial
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QSettings, Qt
 from PySide6.QtGui import QAction, QIcon
@@ -14,6 +13,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
@@ -45,16 +45,27 @@ from core.drt import (
     run_drt,
     run_drt_bht,
 )
-from core.filtering import clear_mask, mask_inductive_points
+from core.filtering import apply_manual_overrides, clear_mask, mask_inductive_points
+from core.generic_parser import parse_generic_file, sniff_columns
 from core.mb_parser import parse_modulobat_file
-from core.plotting import plot_drt, plot_overlay, plot_residuals, plot_single
+from core.plotting import plot_drt, plot_residuals
+from core.plotting_pg import build_nyquist_plot
 from core.validation import mask_residual_outliers, run_kk_test, run_zhit
-from gui.figure_panes import FigureListPane, FigurePane
+from gui.figure_panes import FigureListPane, FigurePane, PgFigurePane
+from gui.generic_import_dialog import GenericImportDialog
 from gui.theme import THEMES, apply_theme
 from gui.workers import DRTWorker, ValidationWorker
 
 SIDEBAR_WIDTH = 320
 VALIDATION_METHODS = ("Kramers-Kronig", "Z-HIT")
+
+# How many residuals figures the Residuals tab offers to draw by default.
+# Each one costs a full matplotlib rasterization (~0.3 s per canvas, which
+# dwarfs the ~0.04 s to build the figure itself), so a 20-sweep selection
+# meant ~6 s of drawing on every visit to the tab. Rendering is capped to
+# this many and only happens when the user asks for it -- see
+# _build_residuals_tab and MainWindow._residuals_armed.
+DEFAULT_RESIDUALS_LIMIT = 5
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.ico"
 
 
@@ -71,19 +82,31 @@ def _add_combo_items(combo: QComboBox, pairs) -> None:
 
 
 def _parse_file(path: str):
-    """Try the Modulo Bat cycling-sequence parser first, then fall back to
-    the generic EIS parser. Returns (datasets, parser_name)."""
+    """Try the Modulo Bat cycling-sequence parser first (content-detected
+    via its 'Nb header lines' signature, so this is safe to attempt
+    regardless of extension), then the standard BioLogic/pyimpspec parser
+    for genuine .mpt exports. Returns (datasets, parser_name). Raises
+    EISParseError otherwise - including for every .txt/.csv, since
+    pyimpspec's own column-guessing heuristics can silently misread an
+    unfamiliar plaintext layout instead of raising, which would skip the
+    user-confirmed column mapping entirely. The caller should fall back to
+    the generic parser on this error (see MainWindow._open_generic_file)."""
+    mb_error: Optional[Exception] = None
     try:
         return parse_modulobat_file(path), "Modulo Bat (cycling sequence)"
-    except Exception as mb_exc:
+    except Exception as exc:
+        mb_error = exc
+
+    if Path(path).suffix.lower() == ".mpt":
         try:
             return parse_eis_file(path), "Standard EIS export"
         except Exception as std_exc:
             raise EISParseError(
-                f"Could not parse '{Path(path).name}'.\n"
-                f"- Modulo Bat parser: {mb_exc}\n"
+                f"- Modulo Bat parser: {mb_error}\n"
                 f"- Standard EIS parser: {std_exc}"
             ) from std_exc
+
+    raise EISParseError(f"- Modulo Bat parser: {mb_error}") from mb_error
 
 
 class MainWindow(QMainWindow):
@@ -98,8 +121,18 @@ class MainWindow(QMainWindow):
         self._source_name = ""
         # {(method, dataset label): KramersKronigResult | ZHITResult}
         self._validation_results = {}
+        # {dataset label: set of point indices} — the eraser's per-point
+        # overrides. Held here rather than in the DataSet's own mask because
+        # _refresh() rebuilds that mask from the automatic filters on every
+        # call and would wipe them; they are re-applied as a layer instead.
+        self._manual_masked: Dict[str, set] = {}
+        self._manual_kept: Dict[str, set] = {}
         self._worker: Optional[ValidationWorker] = None
         self._worker_errors: List[Tuple[str, str]] = []
+        # Method name of the run in flight, for the progress message — the
+        # sidebar radio it came from is disabled mid-run, but reading the
+        # captured value keeps the message correct regardless.
+        self._running_method = ""
         # {dataset label: TRRBFResult | BHTResult} — last DRT run wins
         self._drt_results = {}
         # {dataset label: DRTPeaks}
@@ -114,6 +147,17 @@ class MainWindow(QMainWindow):
         # renders whichever tab was still dirty.
         self._pending: Optional[dict] = None
         self._tab_dirty: set = set()
+        # The Residuals tab goes a step further than the dirty-tab laziness
+        # above: it stays blank until the user clicks "Plot residuals",
+        # because rendering it is by far the most expensive thing the window
+        # does (see DEFAULT_RESIDUALS_LIMIT).
+        #
+        # Once armed it stays armed until a different file is opened, so the
+        # plot survives switching tabs and is rebuilt from current state on
+        # the way back. It used to disarm on every _refresh(), which meant any
+        # sidebar click -- a threshold nudge, a checkbox -- silently emptied
+        # the tab the next time the user looked at it.
+        self._residuals_armed = False
 
         self._settings = QSettings()
         saved = self._settings.value("theme", "light")
@@ -157,7 +201,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_sidebar())
         root.addWidget(self._build_main_area(), stretch=1)
         self.setCentralWidget(central)
-        self.statusBar().showMessage("Open a .mpt or .txt file to begin.")
+        self.statusBar().showMessage("Open a .mpt, .txt, or .csv file to begin.")
 
     def _build_sidebar(self) -> QWidget:
         panel = QWidget()
@@ -218,6 +262,18 @@ class MainWindow(QMainWindow):
         self.inductive_check = QCheckBox("Remove inductive tail (Im(Z) > 0)")
         self.inductive_check.toggled.connect(self._refresh)
         filter_layout.addWidget(self.inductive_check)
+
+        self.eraser_check = QCheckBox("Eraser (click points to mask/unmask)")
+        self.eraser_check.setToolTip(
+            "On the Nyquist plot, click a point to remove it, or a removed "
+            "(grey ×) point to restore it. Manual edits override the filter "
+            "above and the validation outlier threshold, and are cleared when "
+            "a different file is opened.\n\n"
+            "Hiding the 'Removed' series via its legend entry also stops "
+            "those points responding to clicks."
+        )
+        self.eraser_check.toggled.connect(self._on_eraser_toggled)
+        filter_layout.addWidget(self.eraser_check)
         layout.addWidget(filter_box)
 
         # 5. Validation
@@ -230,24 +286,17 @@ class MainWindow(QMainWindow):
         method_group.addButton(self.kk_radio)
         method_group.addButton(self.zhit_radio)
         valid_box.setToolTip(
-            "Kramers-Kronig checks linearity/causality via a lin-KK fit. "
+            "Kramers-Kronig checks linearity/causality via a lin-KK fit, on "
+            "the impedance representation only — fitting the admittance "
+            "representation as well costs roughly 3x the time and mainly "
+            "helps spectra with negative differential resistance. "
             "Z-HIT reconstructs the modulus from the phase data and is good "
-            "at catching non-steady-state artifacts such as low-frequency drift."
+            "at catching non-steady-state artifacts such as low-frequency "
+            "drift; it is also far quicker, since it does no model fitting."
         )
         self.kk_radio.toggled.connect(self._on_method_changed)
         valid_layout.addWidget(self.kk_radio)
         valid_layout.addWidget(self.zhit_radio)
-
-        self.fast_kk_check = QCheckBox("Fast KK (single representation)")
-        self.fast_kk_check.setToolTip(
-            "Kramers-Kronig normally fits both the impedance and admittance "
-            "representations and keeps whichever fits better, which roughly "
-            "doubles the run time. Admittance mainly helps spectra with "
-            "negative differential resistance; fast mode skips it and fixes "
-            "the representation to impedance. The Fext search (time-constant "
-            "range extension) is left at its default regardless."
-        )
-        valid_layout.addWidget(self.fast_kk_check)
 
         valid_layout.addWidget(QLabel("Outlier threshold (%)"))
         self.threshold_spin = QDoubleSpinBox()
@@ -475,13 +524,14 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
 
-        placeholder = QLabel("Open a .mpt or .txt file to begin.")
+        placeholder = QLabel("Open a .mpt, .txt, or .csv file to begin.")
         placeholder.setAlignment(Qt.AlignCenter)
         self.stack.addWidget(placeholder)
 
         self.tabs = QTabWidget()
-        self.nyquist_pane = FigurePane(with_toolbar=True, with_overlay_actions=True)
+        self.nyquist_pane = PgFigurePane(with_overlay_actions=True)
         self.nyquist_pane.replot_requested.connect(self._force_replot_nyquist)
+        self.nyquist_pane.point_mask_toggled.connect(self._on_point_mask_toggled)
         self.residuals_pane = FigureListPane()
         self.drt_pane = FigurePane(with_toolbar=True)
         self.drt_peaks_text = QPlainTextEdit()
@@ -489,7 +539,7 @@ class MainWindow(QMainWindow):
         self.details_text = QPlainTextEdit()
         self.details_text.setReadOnly(True)
         self.tabs.addTab(self.nyquist_pane, "Nyquist")
-        self.tabs.addTab(self.residuals_pane, "Residuals")
+        self.tabs.addTab(self._build_residuals_tab(), "Residuals")
         self.tabs.addTab(self.drt_pane, "DRT")
         self.tabs.addTab(self.drt_peaks_text, "DRT Peaks")
         self.tabs.addTab(self.details_text, "Sweep details")
@@ -497,6 +547,46 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.tabs)
 
         layout.addWidget(self.stack, stretch=1)
+        return container
+
+    def _build_residuals_tab(self) -> QWidget:
+        """The residuals list, above it a header that decides how much of the
+        selection actually gets drawn: a count cap and an explicit trigger.
+        Every other tab plots itself as soon as you look at it; this one
+        doesn't, because it's the only one whose cost scales with the number
+        of selected sweeps (see DEFAULT_RESIDUALS_LIMIT)."""
+        container = QWidget()
+        col = QVBoxLayout(container)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(0)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(6, 4, 6, 4)
+        header.setSpacing(6)
+        header.addWidget(QLabel("Plot first"))
+
+        self.residuals_limit_spin = QSpinBox()
+        self.residuals_limit_spin.setRange(1, 99)
+        self.residuals_limit_spin.setValue(DEFAULT_RESIDUALS_LIMIT)
+        self.residuals_limit_spin.setToolTip(
+            "How many of the validated sweeps to draw, in selection order."
+        )
+        header.addWidget(self.residuals_limit_spin)
+
+        self.residuals_plot_button = QPushButton("Plot residuals")
+        self.residuals_plot_button.setToolTip(
+            "Draw the residuals figures for the current selection."
+        )
+        self.residuals_plot_button.clicked.connect(self._on_plot_residuals_clicked)
+        header.addWidget(self.residuals_plot_button)
+
+        self.residuals_status_label = QLabel()
+        header.addWidget(self.residuals_status_label)
+        header.addStretch()
+
+        col.addLayout(header)
+        col.addWidget(self.residuals_pane, stretch=1)
+        self._update_residuals_header(0, 0)
         return container
 
     # ------------------------------------------------------------- helpers
@@ -525,6 +615,14 @@ class MainWindow(QMainWindow):
             if self.sweep_list.item(i).checkState() == Qt.Checked
         ]
 
+    def _apply_manual_overrides(self, ds) -> None:
+        """Re-assert this sweep's eraser edits over whatever the automatic
+        filters have just decided. A no-op for sweeps that have none."""
+        masked = self._manual_masked.get(ds.label)
+        kept = self._manual_kept.get(ds.label)
+        if masked or kept:
+            apply_manual_overrides(ds, masked or (), kept or ())
+
     def _update_validation_button_text(self) -> None:
         # Keep it short — the selected method is shown by the radios above.
         if self._worker is not None:
@@ -536,7 +634,7 @@ class MainWindow(QMainWindow):
 
     def _open_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Open EIS export", "", "EIS exports (*.mpt *.txt)"
+            self, "Open EIS export", "", "EIS exports (*.mpt *.txt *.csv)"
         )
         if not path:
             return
@@ -544,8 +642,10 @@ class MainWindow(QMainWindow):
         try:
             datasets, parser_used = _parse_file(path)
         except EISParseError as exc:
-            QMessageBox.critical(self, "Parse error", str(exc))
-            return
+            result = self._open_generic_file(path, exc)
+            if result is None:
+                return
+            datasets, parser_used = result
 
         self._datasets = datasets
         self._parser_used = parser_used
@@ -553,6 +653,14 @@ class MainWindow(QMainWindow):
         self._validation_results = {}
         self._drt_results = {}
         self._drt_peaks = {}
+        # Labels ("Set 01", ...) are only unique within a file, so the
+        # previous file's eraser edits would otherwise land on this one's
+        # sweeps.
+        self._manual_masked = {}
+        self._manual_kept = {}
+        # A new file has nothing validated yet, so start the Residuals tab
+        # blank again rather than inheriting the previous file's arming.
+        self._residuals_armed = False
 
         # Elide instead of wrapping: filenames are one unbreakable token, and
         # a word-wrapped QLabel's minimum width would force the sidebar to
@@ -586,6 +694,37 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.tabs)
         self._refresh()
 
+    def _open_generic_file(self, path: str, prior_error: EISParseError):
+        """Fall back to the generic txt/csv parser: sniff headers/roles,
+        let the user confirm/correct the mapping in a dialog, then parse.
+        Returns (datasets, parser_name), or None if the user cancelled or
+        the file couldn't be parsed at all."""
+        try:
+            headers, sample_rows, guessed_roles = sniff_columns(path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Parse error",
+                f"Could not parse '{Path(path).name}'.\n"
+                f"{prior_error}\n"
+                f"- Generic parser: {exc}",
+            )
+            return None
+
+        dialog = GenericImportDialog(
+            Path(path).name, headers, sample_rows, guessed_roles, parent=self
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return None
+
+        try:
+            datasets = parse_generic_file(path, column_roles=dialog.column_roles())
+        except EISParseError as exc:
+            QMessageBox.critical(self, "Parse error", str(exc))
+            return None
+
+        return datasets, "Generic txt/csv export (user-confirmed)"
+
     def _on_mode_changed(self) -> None:
         single = self._mode == "Single"
         self.sweep_combo.setVisible(single)
@@ -595,9 +734,44 @@ class MainWindow(QMainWindow):
     def _on_method_changed(self, checked: bool) -> None:
         if not checked:
             return  # fires once per radio; only act on the newly-checked one
-        self.fast_kk_check.setEnabled(self.kk_radio.isChecked())
         self._update_validation_button_text()
         self._refresh()
+
+    def _on_eraser_toggled(self, checked: bool) -> None:
+        """Purely a mode switch — no mask changes, so no _refresh()."""
+        self.nyquist_pane.set_eraser_enabled(checked)
+        if checked:
+            self.statusBar().showMessage(
+                "Eraser on — click a point on the Nyquist plot to remove it, "
+                "or a grey × to restore it."
+            )
+        else:
+            self.statusBar().showMessage("Eraser off.")
+
+    def _on_point_mask_toggled(self, label: str, index: int) -> None:
+        """Flip one point's manual override, then let _refresh() recompose the
+        mask and redraw.
+
+        Which way it flips is read from the sweep's *current* mask rather than
+        from the override sets, so a point the filters removed toggles to
+        'keep' on the first click regardless of how it got removed."""
+        ds = next((d for d in self._datasets if d.label == label), None)
+        if ds is None:
+            return
+
+        masked = self._manual_masked.setdefault(label, set())
+        kept = self._manual_kept.setdefault(label, set())
+        if ds.data.get_mask().get(index, False):
+            masked.discard(index)
+            kept.add(index)
+            action = "restored"
+        else:
+            kept.discard(index)
+            masked.add(index)
+            action = "removed"
+
+        self._refresh()
+        self.statusBar().showMessage(f"{label}: point {index + 1} {action}.")
 
     def _on_theme_toggled(self, checked: bool) -> None:
         self._theme_mode = "dark" if checked else "light"
@@ -613,13 +787,7 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         method = self._validation_method
-        if method == VALIDATION_METHODS[0]:
-            if self.fast_kk_check.isChecked():
-                runner = partial(run_kk_test, admittance=False)
-            else:
-                runner = run_kk_test
-        else:
-            runner = run_zhit
+        runner = run_kk_test if method == VALIDATION_METHODS[0] else run_zhit
 
         # Masks must be stable while the worker reads them, so lock the
         # sidebar for the duration of the run.
@@ -627,14 +795,24 @@ class MainWindow(QMainWindow):
         self._worker = ValidationWorker(method, runner, selected, parent=self)
         self._worker.result_ready.connect(self._on_validation_result)
         self._worker.error.connect(self._on_validation_error)
+        self._worker.progress.connect(self._on_validation_progress)
         self._worker.finished.connect(self._on_validation_finished)
+        self._running_method = method
         self._sidebar.setEnabled(False)
         self._update_validation_button_text()
-        self.statusBar().showMessage(f"Running {method} analysis…")
+        self.statusBar().showMessage(f"Running {method} analysis… 0 of {len(selected)}")
         self._worker.start()
 
     def _on_validation_result(self, method: str, label: str, result) -> None:
         self._validation_results[(method, label)] = result
+
+    def _on_validation_progress(self, done: int, total: int) -> None:
+        """Sweeps finish out of order (they run in a process pool), so this
+        is a count, not a name — a batch can otherwise sit on one unchanging
+        status message for minutes."""
+        self.statusBar().showMessage(
+            f"Running {self._running_method} analysis… {done} of {total}"
+        )
 
     def _on_validation_error(self, label: str, message: str) -> None:
         self._worker_errors.append((label, message))
@@ -838,6 +1016,10 @@ class MainWindow(QMainWindow):
             self.details_text.clear()
             self._pending = None
             self._tab_dirty.clear()
+            # Stays armed: unchecking the last sweep and rechecking one is a
+            # transient state on the way to a new selection, not a request to
+            # go back to a blank tab.
+            self._update_residuals_header(0, 0)
             return
 
         method = self._validation_method
@@ -848,6 +1030,11 @@ class MainWindow(QMainWindow):
                 mask_inductive_points(ds)
             else:
                 clear_mask(ds)
+            # Before the outlier pass, not just after: this reproduces the
+            # mask a validation run actually observed, so erasing a point and
+            # then running validation doesn't trip the length check below and
+            # report a spurious "stale" result.
+            self._apply_manual_overrides(ds)
 
         stale_labels = []
         for ds in selected:
@@ -857,11 +1044,16 @@ class MainWindow(QMainWindow):
                     mask_residual_outliers(ds, result, threshold)
                 except ValueError:
                     stale_labels.append(ds.label)
+            # Again, on top of the outlier pass -- which only ever adds masks,
+            # so this is what lets a manually restored point survive a
+            # threshold that would otherwise drop it.
+            self._apply_manual_overrides(ds)
 
         if stale_labels:
             self.warning_label.setText(
                 f"{method} results for {', '.join(stale_labels)} no longer match "
-                f"the current mask (e.g. the inductive-tail filter changed) — "
+                f"the current mask (e.g. the inductive-tail filter or the "
+                f"eraser changed it) — "
                 f"click 'Run {method} validation' again."
             )
             self.warning_label.show()
@@ -892,10 +1084,44 @@ class MainWindow(QMainWindow):
             drt_selected=drt_selected,
         )
         self._tab_dirty = {0, 1, 2, 3, 4}
+        # _residuals_armed deliberately survives this. Marking the tab dirty
+        # is enough: the redraw is deferred until the Residuals tab is the
+        # visible one, so a checkbox click from another tab still costs
+        # nothing. The one case that does redraw immediately is a sidebar
+        # change made while already looking at the residuals, which is the
+        # point -- they would otherwise be showing the wrong threshold.
         self._render_active_tab()
 
     def _on_tab_changed(self, _index: int) -> None:
         self._render_active_tab()
+
+    def _on_plot_residuals_clicked(self) -> None:
+        """Arms the Residuals tab and draws it. Stays armed for the rest of
+        the session on this file, so the plot persists across tab switches
+        and sidebar changes and only needs this click once."""
+        self._residuals_armed = True
+        self._tab_dirty.add(1)
+        self._render_active_tab()
+
+    def _update_residuals_header(self, shown: int, total: int) -> None:
+        """Says how much of the selection made it onto the screen.
+
+        Deliberately does not clamp the spin box to the available count:
+        QSpinBox truncates its value to fit a lowered maximum, so tracking
+        the selection size would quietly rewrite the user's chosen limit
+        every time they narrowed the selection (and, at startup, would pin
+        it to 1 before any sweep exists). The limit is a standing preference;
+        the cap is applied when slicing instead."""
+        self.residuals_plot_button.setEnabled(total > 0)
+        if total == 0:
+            text = "No validated sweeps — run a validation first."
+        elif shown == 0:
+            text = f"{total} validated sweep(s) ready."
+        elif shown < total:
+            text = f"Showing {shown} of {total}."
+        else:
+            text = f"Showing all {total}."
+        self.residuals_status_label.setText(text)
 
     def _force_replot_nyquist(self) -> None:
         """Rebuild the Nyquist tab from current state, bypassing the dirty
@@ -920,22 +1146,24 @@ class MainWindow(QMainWindow):
         if index == 0:
             # Removed points are always drawn; the Nyquist pane's "Hide
             # Removed Points" overlay button toggles their visibility.
-            if self._mode == "Single":
-                fig, _ = plot_single(
-                    p["selected"][0],
-                    show=False,
-                    style=self._style,
-                    show_removed=True,
-                )
-            else:
-                fig, _ = plot_overlay(
-                    p["selected"], show=False, style=self._style, show_removed=True
-                )
-            self.nyquist_pane.set_figure(fig)
+            title = (
+                p["selected"][0].full_label
+                if self._mode == "Single"
+                else p["selected"][0].source_file
+            )
+            widget = build_nyquist_plot(
+                p["selected"], title=title, style=self._style, show_removed=True
+            )
+            self.nyquist_pane.set_widget(widget)
 
         elif index == 1:
+            # Unlike every other branch here, this one can decline to draw:
+            # it stays empty until "Plot residuals" arms it, and even then
+            # only covers the first N of the selection.
+            validated = p["validated_selected"]
+            shown = validated[: self.residuals_limit_spin.value()] if self._residuals_armed else []
             residual_figs = []
-            for ds in p["validated_selected"]:
+            for ds in shown:
                 result = self._validation_results[(p["method"], ds.label)]
                 fig_r, _ = plot_residuals(
                     result,
@@ -945,6 +1173,7 @@ class MainWindow(QMainWindow):
                 )
                 residual_figs.append(fig_r)
             self.residuals_pane.set_figures(residual_figs)
+            self._update_residuals_header(len(shown), len(validated))
 
         elif index == 2:
             if p["drt_selected"]:

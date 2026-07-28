@@ -9,6 +9,7 @@ dependencies = [
     "pyimpspec>=5.1.3",
     "pyprobe-data>=2.6.0",
     "pyqtdarktheme-fork>=2.3.6",
+    "pyqtgraph>=0.14.0",
     "pyside6>=6.11.1",
     "streamlit",
 ]
