@@ -82,6 +82,15 @@ class GenericImportDialog(QDialog):
         form.addRow("Phase:", self._wrap(self._phase_combo, self._phase_negate))
         layout.addLayout(form)
 
+        self._apply_all_check = QCheckBox("Apply this mapping to all remaining files")
+        self._apply_all_check.setToolTip(
+            "When loading several files at once, skip this dialog for the "
+            "rest of the batch and reuse this mapping -- as long as a given "
+            "file's headers match this one's exactly. A file with different "
+            "headers still gets its own dialog."
+        )
+        layout.addWidget(self._apply_all_check)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
@@ -145,6 +154,12 @@ class GenericImportDialog(QDialog):
                 )
                 return
         self.accept()
+
+    def apply_to_all(self) -> bool:
+        """Whether the accepted mapping should be reused for the rest of the
+        current load batch without asking again (see gui.main_window's
+        generic-import cache)."""
+        return self._apply_all_check.isChecked()
 
     def column_roles(self) -> Dict[str, int]:
         """Build the column_roles mapping expected by parse_generic_file."""

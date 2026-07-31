@@ -16,20 +16,42 @@ class EISDataset:
     Wraps a single pyimpspec DataSet (one frequency sweep / experiment).
     """
 
-    def __init__(self, dataset: DataSet, index: int, source_file: str):
+    def __init__(self, dataset: DataSet, index: int, source_file: str, file_id: int = 0):
         self._dataset = dataset
         self.index = index
         self.source_file = source_file
+        # Identifies which loaded file this sweep came from. Distinct from
+        # source_file (a filename stem, which two different files can share)
+        # -- it's what makes `key` unique when several files are open at
+        # once. Defaults to 0 for single-file callers (scripts, Streamlit).
+        self.file_id = file_id
 
     @property
     def label(self) -> str:
-        """Short label for legends, e.g. 'Set 01'."""
+        """Short label for legends, e.g. 'Set 01'. Unique only within the
+        same file -- use `key` for anything that must stay unique across
+        several loaded files."""
         return f"Set {self.index + 1:02d}"
 
     @property
     def full_label(self) -> str:
         """Full label for titles/filenames, e.g. 'my_file_set01'."""
         return f"{self.source_file}_set{self.index + 1:02d}"
+
+    @property
+    def key(self) -> str:
+        """Stable identity for dict keys/signals -- unique across every
+        loaded file, unlike `label`. Use this, never `label`, anywhere a
+        sweep from one file must not collide with a same-labeled sweep from
+        another."""
+        return f"{self.file_id}:{self.index}"
+
+    @property
+    def qualified_label(self) -> str:
+        """Display label that disambiguates across files, e.g.
+        'my_file · Set 01'. Use in legends/titles once more than one file is
+        loaded; `label` alone is fine when there's only ever been one."""
+        return f"{self.source_file} · {self.label}"
 
     @property
     def frequencies(self):
@@ -53,9 +75,11 @@ class EISDataset:
     def to_dict(self) -> dict:
         Z = self.impedances
         return {
+            "key":            self.key,
             "label":          self.label,
             "full_label":     self.full_label,
             "index":          self.index,
+            "file_id":        self.file_id,
             "num_points":     self.num_points,
             "frequencies_hz": self.frequencies.tolist(),
             "re_z_ohm":       Z.real.tolist(),
@@ -72,7 +96,7 @@ class EISDataset:
 _SUPPORTED_EXTENSIONS = (".mpt", ".txt")
 
 
-def parse_eis_file(file_path: str | Path) -> List[EISDataset]:
+def parse_eis_file(file_path: str | Path, file_id: int = 0) -> List[EISDataset]:
     """
     Parse a BioLogic .mpt or plaintext .txt file into a list of EISDataset objects.
     """
@@ -100,6 +124,6 @@ def parse_eis_file(file_path: str | Path) -> List[EISDataset]:
         )
 
     return [
-        EISDataset(ds, index=i, source_file=path.stem)
+        EISDataset(ds, index=i, source_file=path.stem, file_id=file_id)
         for i, ds in enumerate(raw_datasets)
     ]

@@ -1,11 +1,15 @@
 #DRT (distribution of relaxation times)
-from pyimpspec.analysis.drt import (
-    BHTResult,
-    TRRBFResult,
-    calculate_drt_bht,
-    calculate_drt_tr_rbf,
-)
-from pyimpspec.analysis.drt.peak_analysis import DRTPeaks
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+# pyimpspec is imported inside the run_* functions rather than here, and the
+# annotations below are strings thanks to the __future__ import. That is what
+# lets the GUI read the option tuples while building its sidebar without
+# paying ~4 s for pyimpspec (scipy.signal, sympy); see core/__init__.py.
+if TYPE_CHECKING:
+    from pyimpspec.analysis.drt import BHTResult, TRRBFResult
+    from pyimpspec.analysis.drt.peak_analysis import DRTPeaks
 
 RBF_TYPES = (
     "gaussian",
@@ -69,6 +73,8 @@ def run_drt(
         "Optimal Regularization parameter" once cross-validated)
     Pass the result to analyze_drt_peaks() for peak positions.
     """
+    from pyimpspec.analysis.drt import calculate_drt_tr_rbf
+
     return calculate_drt_tr_rbf(
         dataset.data,
         mode=mode,
@@ -107,6 +113,8 @@ def run_drt_bht(
     (tau, gamma_re, gamma_im) since the DRT is estimated separately from
     each part of the impedance.
     """
+    from pyimpspec.analysis.drt import calculate_drt_bht
+
     return calculate_drt_bht(
         dataset.data,
         rbf_type=rbf_type,

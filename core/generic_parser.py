@@ -8,6 +8,8 @@ roles are guessed from the header text but callers can override the guess
 with an explicit ``column_roles`` mapping (e.g. from a GUI confirmation
 dialog) when the guess is wrong or ambiguous.
 """
+from __future__ import annotations
+
 import csv
 import re
 from pathlib import Path
@@ -74,14 +76,32 @@ def guess_column_roles(headers: Sequence[str]) -> Dict[str, int]:
     return mapping
 
 
-def _read_rows(path: Path, encoding: str) -> Tuple[List[str], List[List[str]]]:
+def _read_lines(path: Path, encoding: str) -> List[str]:
     with open(path, "r", encoding=encoding, newline="") as f:
         text = f.read()
 
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if not lines:
         raise EISParseError(f"'{path.name}' is empty.")
+    return lines
 
+
+def _read_rows(path: Path, encoding: str) -> Tuple[List[str], List[List[str]]]:
+    """Read a file and split it into (headers, data_rows)."""
+    return _split_rows(_read_lines(path, encoding))
+
+
+def _split_rows(lines: List[str]) -> Tuple[List[str], List[List[str]]]:
+    """Hand-split every line/cell in pure Python.
+
+    This used to hand off delimited files to pandas' C parser. Measured on
+    the exports this actually sees, that was the wrong trade: ~3x *slower*
+    than this on a few-hundred-row sweep file, and the ~0.6s it saved on an
+    86k-row one was less than the ~0.9s pandas costs to import -- an import
+    that, being deferred to first use, landed inside the click that opens
+    the file. Splitting here keeps the parse dependency-free and the cost
+    proportional to the file.
+    """
     delimiter = next((c for c in _DELIMITER_CANDIDATES if c in lines[0]), None)
     if delimiter:
         # csv.reader (not str.split) so quoted fields - e.g. Excel's "CSV
@@ -89,12 +109,30 @@ def _read_rows(path: Path, encoding: str) -> Tuple[List[str], List[List[str]]]:
         # correctly instead of leaving literal quote characters behind.
         rows = list(csv.reader(lines, delimiter=delimiter))
     else:
-        rows = [re.split(r"\s+", ln.strip()) for ln in lines]
+        # str.split() with no args splits on any run of whitespace and is
+        # implemented in C, unlike re.split(r"\s+", ...) - matters here
+        # since this runs once per line.
+        rows = [ln.split() for ln in lines]
 
-    headers = [h.strip() for h in rows[0]]
+    # A trailing delimiter on a line yields a phantom empty field (BioLogic
+    # exports end every row with a tab). Trim those so the header width
+    # matches the real data width instead of silently dropping every row.
+    headers = _rstrip_blanks([h.strip() for h in rows[0]])
     ncols = len(headers)
-    data_rows = [r for r in rows[1:] if len(r) == ncols]
-    return headers, data_rows
+    data_rows = [
+        cells
+        for cells in ([c.strip() for c in r] for r in rows[1:])
+        if len(_rstrip_blanks(cells)) == ncols
+    ]
+    return headers, [r[:ncols] for r in data_rows]
+
+
+def _rstrip_blanks(cells: List[str]) -> List[str]:
+    """Drop trailing empty fields left behind by a trailing delimiter."""
+    end = len(cells)
+    while end > 0 and not cells[end - 1]:
+        end -= 1
+    return cells[:end]
 
 
 def sniff_columns(
@@ -114,10 +152,32 @@ def sniff_columns(
     return headers, data_rows[:5], guess_column_roles(headers)
 
 
+def _column_to_floats(rows: List[List[str]], col: int) -> np.ndarray:
+    """Convert one column of a hand-split data grid to a float array.
+
+    Tries a single bulk conversion first (fast path: the common case of a
+    clean numeric export). Only falls back to converting cell-by-cell -
+    turning unparseable cells into NaN rather than raising - if the bulk
+    conversion hits a bad cell somewhere in the column.
+    """
+    cells = [row[col] for row in rows]
+    try:
+        return np.array(cells, dtype=np.float64)
+    except ValueError:
+        out = np.full(len(cells), np.nan)
+        for i, cell in enumerate(cells):
+            try:
+                out[i] = float(cell)
+            except ValueError:
+                pass
+        return out
+
+
 def parse_generic_file(
     file_path: str | Path,
     column_roles: Optional[Dict[str, int]] = None,
     encoding: str = "utf-8-sig",
+    file_id: int = 0,
 ) -> List[EISDataset]:
     """Parse a generic single- or multi-sweep EIS export (plain .txt or
     .csv) with arbitrary column headers.
@@ -133,9 +193,12 @@ def parse_generic_file(
         raise FileNotFoundError(f"File not found: {path}")
 
     try:
-        headers, data_rows = _read_rows(path, encoding)
+        lines = _read_lines(path, encoding)
     except UnicodeDecodeError:
-        headers, data_rows = _read_rows(path, "latin-1")
+        encoding = "latin-1"
+        lines = _read_lines(path, encoding)
+
+    headers, data_rows = _split_rows(lines)
 
     roles = column_roles if column_roles is not None else guess_column_roles(headers)
 
@@ -166,51 +229,69 @@ def parse_generic_file(
             (roles["phase"], False) if "phase" in roles else (roles["neg_phase"], True)
         )
 
-    frequencies: List[float] = []
-    impedances: List[complex] = []
-    for row in data_rows:
-        try:
-            f = float(row[freq_col])
-            if has_re_im:
-                re_val = float(row[re_col])
-                im_val = float(row[im_col])
-                if im_neg:
-                    im_val = -im_val
-                z = complex(re_val, im_val)
-            else:
-                mag = float(row[mag_col])
-                phase_deg = float(row[phase_col])
-                if phase_neg:
-                    phase_deg = -phase_deg
-                theta = np.radians(phase_deg)
-                z = complex(mag * np.cos(theta), mag * np.sin(theta))
-        except (ValueError, IndexError):
-            continue
-        frequencies.append(f)
-        impedances.append(z)
+    def column(idx: int) -> np.ndarray:
+        return _column_to_floats(data_rows, idx)
 
-    if not frequencies:
+    freqs = column(freq_col)
+    if has_re_im:
+        re_vals = column(re_col)
+        im_vals = column(im_col)
+        if im_neg:
+            im_vals = -im_vals
+        z = re_vals + 1j * im_vals
+    else:
+        mag = column(mag_col)
+        phase_deg = column(phase_col)
+        if phase_neg:
+            phase_deg = -phase_deg
+        theta = np.radians(phase_deg)
+        z = mag * np.cos(theta) + 1j * mag * np.sin(theta)
+
+    # Instruments pad a sweep out to a fixed row count with all-zero rows
+    # (and unparseable cells above became NaN); f <= 0 is not a measurable
+    # EIS point in any case.
+    valid = np.isfinite(freqs) & (freqs > 0.0) & np.isfinite(z)
+    frequencies = freqs[valid]
+    impedances = z[valid]
+
+    if frequencies.size == 0:
         raise EISParseError(f"No numeric data rows found in '{path.name}'.")
 
     sweeps = _split_into_sweeps(frequencies, impedances)
 
     datasets = []
     for i, (freqs, zs) in enumerate(sweeps):
+        freqs, zs = _drop_duplicate_frequencies(freqs, zs)
         ds = DataSet(np.array(freqs), np.array(zs), label=f"Sweep {i + 1}", path=str(path))
-        datasets.append(EISDataset(ds, index=i, source_file=path.stem))
+        datasets.append(EISDataset(ds, index=i, source_file=path.stem, file_id=file_id))
     return datasets
 
 
+def _drop_duplicate_frequencies(
+    frequencies: np.ndarray, impedances: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Keep only the first row per frequency, preserving sweep order.
+
+    pyimpspec's DataSet rejects a repeated frequency outright, but real
+    exports do repeat one (a point measured twice for averaging, duplicated
+    rows). Dropping the repeat costs one point; letting it through raises
+    ValueError out of the parser and used to take the whole app down.
+    """
+    _, first_occurrence = np.unique(frequencies, return_index=True)
+    keep = np.sort(first_occurrence)
+    return frequencies[keep], impedances[keep]
+
+
 def _split_into_sweeps(
-    frequencies: List[float], impedances: List[complex]
-) -> List[Tuple[List[float], List[complex]]]:
+    frequencies: np.ndarray, impedances: np.ndarray
+) -> List[Tuple[np.ndarray, np.ndarray]]:
     """Split rows into separate sweeps whenever the frequency direction
     reverses. A single EIS sweep moves monotonically high->low or
     low->high, so a reversal marks the start of the next sweep."""
     if len(frequencies) < 2:
         return [(frequencies, impedances)]
 
-    sweeps: List[Tuple[List[float], List[complex]]] = []
+    sweeps: List[Tuple[np.ndarray, np.ndarray]] = []
     start = 0
     direction = 0
     for i in range(1, len(frequencies)):
@@ -221,8 +302,14 @@ def _split_into_sweeps(
         if direction == 0:
             direction = cur_dir
         elif cur_dir != direction:
-            sweeps.append((frequencies[start:i], impedances[start:i]))
-            start = i
+            # A down-then-up (or up-then-down) run usually measures the
+            # turning-point frequency twice, once per direction. Cut between
+            # those two rows so each sweep keeps its own copy -- cutting at i
+            # instead would leave both in the outgoing sweep, i.e. a repeated
+            # frequency that DataSet rejects.
+            cut = i - 1 if frequencies[i - 1] == frequencies[i - 2] else i
+            sweeps.append((frequencies[start:cut], impedances[start:cut]))
+            start = cut
             direction = 0
     sweeps.append((frequencies[start:], impedances[start:]))
     return sweeps

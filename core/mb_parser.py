@@ -11,7 +11,9 @@ from core.io_utils import EISDataset, EISParseError
 _EIS_TECHNIQUES = {"PEIS", "GEIS"}
 
 
-def parse_modulobat_file(file_path: str | Path, encoding: str = "latin-1") -> List[EISDataset]:
+def parse_modulobat_file(
+    file_path: str | Path, encoding: str = "latin-1", file_id: int = 0
+) -> List[EISDataset]:
     """
     Parse a BioLogic/BT-Lab Modulo Bat .mpt export, extracting the PEIS/GEIS
     sub-measurements embedded in the cycling sequence.
@@ -73,7 +75,7 @@ def parse_modulobat_file(file_path: str | Path, encoding: str = "latin-1") -> Li
         frequencies = np.array([r[0] for r in rows])
         impedances = np.array([complex(r[1], -r[2]) for r in rows])
         ds = DataSet(frequencies, impedances, label=f"z cycle {zcycle}", path=str(path))
-        datasets.append(EISDataset(ds, index=i, source_file=path.stem))
+        datasets.append(EISDataset(ds, index=i, source_file=path.stem, file_id=file_id))
 
     return datasets
 

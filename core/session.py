@@ -1,4 +1,5 @@
-# Save/load an analysis session (datasets + validation + DRT results) as JSON.
+# Save/load an analysis session (datasets + validation + DRT results) as
+# gzipped JSON (.eisz).
 #
 # pyimpspec's analysis result classes (KramersKronigResult, ZHITResult,
 # TRRBFResult, BHTResult, DRTPeaks) have no to_dict()/from_dict() of their
@@ -7,9 +8,14 @@
 # was created with; this schema is versioned and survives library upgrades
 # as long as SCHEMA_VERSION is bumped (with a migration) when the format
 # changes.
+#
+# The file itself is gzipped JSON rather than plain JSON: numeric arrays
+# compress ~4-5x, and gzip's magic bytes (1f 8b) let load_session tell a
+# compressed file from a plain one, so old plain-JSON sessions still open.
+import gzip
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from pyimpspec import DataSet, KramersKronigResult, ZHITResult, parse_cdc
@@ -18,7 +24,8 @@ from pyimpspec.analysis.drt.peak_analysis import DRTPeak, DRTPeaks
 
 from core.io_utils import EISDataset
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
+_GZIP_MAGIC = b"\x1f\x8b"
 
 
 # ---- shared numeric helpers ----
@@ -42,6 +49,7 @@ def dataset_to_dict(ds: EISDataset) -> dict:
     return {
         "index": ds.index,
         "source_file": ds.source_file,
+        "file_id": ds.file_id,
         "data": ds.data.to_dict(),
     }
 
@@ -56,6 +64,9 @@ def dataset_from_dict(d: dict) -> EISDataset:
         DataSet.from_dict(data_dict),
         index=d["index"],
         source_file=d["source_file"],
+        # Absent in schema v1/v2 sessions, which predate multi-file support
+        # -- every dataset they ever saved had the implicit file_id=0.
+        file_id=d.get("file_id", 0),
     )
 
 
@@ -214,11 +225,74 @@ def drt_peaks_from_dict(d: dict) -> DRTPeaks:
     )
 
 
+# ---- UI state ----
+# Everything _refresh() reads to decide what a sweep's mask looks like, and
+# that the automatic filters alone can't reconstruct: the eraser's per-point
+# overrides (main_window._manual_masked/_manual_kept -- see the comment at
+# their definition for why those live outside DataSet.mask) plus the filter
+# widget values. Without this, reloading a session and touching any sidebar
+# control would silently re-derive a different mask than the one saved.
+#
+# manual_masked/manual_kept are keyed by ds.key (not ds.label) as of schema
+# v3, so overrides land on the right sweep when a session has more than one
+# source file -- see ui_state_from_dict's v1/v2 fallback below. There is no
+# "source_name" field as of v3: with several files loaded there's no single
+# name to store, and it's not needed anyway -- gui.main_window rebuilds its
+# file list straight from the loaded datasets' file_id/source_file.
+
+def ui_state_to_dict(
+    manual_masked: Dict[str, set],
+    manual_kept: Dict[str, set],
+    validation_method: str,
+    inductive_filter: bool,
+    residual_threshold: float,
+) -> dict:
+    return {
+        "manual_masked": {key: sorted(idxs) for key, idxs in manual_masked.items()},
+        "manual_kept": {key: sorted(idxs) for key, idxs in manual_kept.items()},
+        "validation_method": validation_method,
+        "inductive_filter": inductive_filter,
+        "residual_threshold": residual_threshold,
+    }
+
+
+def ui_state_from_dict(d: dict, key_by_label: Optional[Dict[str, str]] = None) -> dict:
+    """key_by_label resolves a v1/v2 session's label-keyed manual_masked/
+    manual_kept back to ds.key -- see load_session's own _resolve_key for why
+    that mapping is safe (every pre-v3 session had exactly one file). Omit it
+    (or leave a label unresolved) and the raw label passes through instead,
+    which is only reachable from a hand-edited or corrupt session file."""
+    key_by_label = key_by_label or {}
+
+    def _remap(overrides: dict) -> Dict[str, set]:
+        return {
+            key_by_label.get(label, label): set(idxs)
+            for label, idxs in overrides.items()
+        }
+
+    return {
+        "manual_masked": _remap(d.get("manual_masked", {})),
+        "manual_kept": _remap(d.get("manual_kept", {})),
+        "validation_method": d.get("validation_method"),
+        "inductive_filter": d.get("inductive_filter", False),
+        "residual_threshold": d.get("residual_threshold"),
+    }
+
+
 # ---- whole session ----
 # Result dicts are keyed the same way main_window.py keys its in-memory
-# caches: validation_results by (method, dataset_label), drt_results and
-# drt_peaks by dataset_label. Labels are stable (derived from dataset index),
-# so they round-trip correctly as long as dataset order/index is preserved.
+# caches: validation_results by (method, ds.key), drt_results and drt_peaks
+# by ds.key. ds.key (file_id:index) is unique across every loaded file,
+# unlike ds.label ("Set 01") which only a single-file session could get away
+# with -- see core.io_utils.EISDataset. Each entry also carries dataset_label
+# alongside dataset_key purely for a human reading the raw JSON; only the key
+# is used to reconstruct the in-memory dicts.
+#
+# validation_params/drt_params carry the effective keyword arguments behind
+# each result (e.g. rbf_type, shape_coeff, lambda_value, admittance) --
+# without them a reloaded curve can be viewed but not explained or
+# reproduced. They're free-form dicts of JSON scalars, keyed the same way as
+# their corresponding result.
 
 def save_session(
     path,
@@ -226,42 +300,70 @@ def save_session(
     validation_results: Dict[Tuple[str, str], Any],
     drt_results: Dict[str, Any],
     drt_peaks: Dict[str, DRTPeaks],
+    validation_params: Dict[Tuple[str, str], dict] = None,
+    drt_params: Dict[str, dict] = None,
+    ui_state: dict = None,
 ) -> None:
+    validation_params = validation_params or {}
+    drt_params = drt_params or {}
+    label_by_key = {ds.key: ds.label for ds in datasets}
+
     session = {
         "schema_version": SCHEMA_VERSION,
         "datasets": [dataset_to_dict(ds) for ds in datasets],
         "validation_results": [
             {
                 "method": method,
-                "dataset_label": label,
+                "dataset_key": key,
+                "dataset_label": label_by_key.get(key, key),
                 "kind": _VALIDATION_KIND[type(result)],
                 "result": _VALIDATION_TO_DICT[_VALIDATION_KIND[type(result)]](result),
+                "params": validation_params.get((method, key), {}),
             }
-            for (method, label), result in validation_results.items()
+            for (method, key), result in validation_results.items()
         ],
         "drt_results": [
             {
-                "dataset_label": label,
+                "dataset_key": key,
+                "dataset_label": label_by_key.get(key, key),
                 "kind": _DRT_KIND[type(result)],
                 "result": _DRT_TO_DICT[_DRT_KIND[type(result)]](result),
+                "params": drt_params.get(key, {}),
             }
-            for label, result in drt_results.items()
+            for key, result in drt_results.items()
         ],
         "drt_peaks": [
-            {"dataset_label": label, "peaks": drt_peaks_to_dict(peaks)}
-            for label, peaks in drt_peaks.items()
+            {
+                "dataset_key": key,
+                "dataset_label": label_by_key.get(key, key),
+                "peaks": drt_peaks_to_dict(peaks),
+            }
+            for key, peaks in drt_peaks.items()
         ],
+        "ui_state": ui_state or {},
     }
-    Path(path).write_text(json.dumps(session, indent=2))
+    payload = json.dumps(session, separators=(",", ":"), allow_nan=False)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        f.write(payload)
 
 
 def load_session(
     path,
-) -> Tuple[List[EISDataset], Dict[Tuple[str, str], Any], Dict[str, Any], Dict[str, DRTPeaks]]:
-    session = json.loads(Path(path).read_text())
+) -> Tuple[
+    List[EISDataset],
+    Dict[Tuple[str, str], Any],
+    Dict[str, Any],
+    Dict[str, DRTPeaks],
+    Dict[Tuple[str, str], dict],
+    Dict[str, dict],
+    dict,
+]:
+    raw = Path(path).read_bytes()
+    text = gzip.decompress(raw).decode("utf-8") if raw[:2] == _GZIP_MAGIC else raw.decode("utf-8")
+    session = json.loads(text)
 
     version = session.get("schema_version")
-    if version != SCHEMA_VERSION:
+    if version not in (1, 2, SCHEMA_VERSION):
         raise ValueError(
             f"Unsupported session schema version: {version!r} "
             f"(this build supports {SCHEMA_VERSION})"
@@ -269,19 +371,51 @@ def load_session(
 
     datasets = [dataset_from_dict(d) for d in session["datasets"]]
 
+    # v1/v2 sessions predate multi-file support and keyed every result by
+    # "dataset_label" alone (e.g. "Set 01"), which was safe back then because
+    # a session could only ever hold one file's worth of sweeps. Resolve
+    # those old labels back to the now-canonical ds.key via the datasets just
+    # loaded -- unambiguous for the same reason. v3+ sessions carry
+    # "dataset_key" directly and skip this entirely.
+    key_by_label = {ds.label: ds.key for ds in datasets}
+
+    def _resolve_key(entry: dict) -> str:
+        if "dataset_key" in entry:
+            return entry["dataset_key"]
+        label = entry["dataset_label"]
+        return key_by_label.get(label, label)
+
     validation_results = {
-        (v["method"], v["dataset_label"]): _VALIDATION_FROM_DICT[v["kind"]](v["result"])
+        (v["method"], _resolve_key(v)): _VALIDATION_FROM_DICT[v["kind"]](v["result"])
+        for v in session["validation_results"]
+    }
+    validation_params = {
+        (v["method"], _resolve_key(v)): v.get("params", {})
         for v in session["validation_results"]
     }
 
     drt_results = {
-        d["dataset_label"]: _DRT_FROM_DICT[d["kind"]](d["result"])
+        _resolve_key(d): _DRT_FROM_DICT[d["kind"]](d["result"])
+        for d in session["drt_results"]
+    }
+    drt_params = {
+        _resolve_key(d): d.get("params", {})
         for d in session["drt_results"]
     }
 
     drt_peaks = {
-        p["dataset_label"]: drt_peaks_from_dict(p["peaks"])
+        _resolve_key(p): drt_peaks_from_dict(p["peaks"])
         for p in session["drt_peaks"]
     }
 
-    return datasets, validation_results, drt_results, drt_peaks
+    ui_state = ui_state_from_dict(session.get("ui_state", {}), key_by_label)
+
+    return (
+        datasets,
+        validation_results,
+        drt_results,
+        drt_peaks,
+        validation_params,
+        drt_params,
+        ui_state,
+    )
