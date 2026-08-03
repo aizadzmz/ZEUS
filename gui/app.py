@@ -22,6 +22,11 @@ _SPLASH_STEPS = (
     ("Loading EIS parsers...", "core.io_utils"),
     ("Loading validation tools (pyimpspec)...", "core.validation"),
     ("Loading DRT tools...", "core.drt"),
+    ("Loading circuit fitting tools...", "core.ecm"),
+    # ~0.5 s, and core.circuit_diagram defers it like every other heavy
+    # import, so without this the first visit to the ECM Parameters tab pays
+    # it mid-click.
+    ("Loading circuit diagrams...", "schemdraw.elements"),
     ("Loading filters...", "core.filtering"),
     ("Loading generic parser...", "core.generic_parser"),
     ("Loading multi-block parser...", "core.mb_parser"),

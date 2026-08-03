@@ -183,3 +183,38 @@ class DRTWorker(QThread):
                 self.error.emit(ds.key, str(exc))
             else:
                 self.result_ready.emit(ds.key, result)
+
+
+class ECMWorker(QThread):
+    """Fits an equivalent circuit to several datasets off the UI thread.
+
+    A single CNLS fit is fast (~0.02 s for R(RC)(RC) on 40 points), but a
+    batch of them is not, and the sidebar stays disabled for the duration --
+    so this reports progress per sweep rather than only on completion, which
+    is the one thing it adds over DRTWorker.
+
+    Deliberately serial, and not poolable like ValidationWorker: with
+    "seed from previous" enabled each fit's starting guess is the previous
+    fit's result, so the sweeps are a chain rather than independent work.
+    Running them in order also keeps the seeding deterministic.
+    """
+
+    result_ready = Signal(str, object)  # dataset key, FitResult
+    error = Signal(str, str)            # dataset key, message
+    progress = Signal(int, int)         # completed count, total
+
+    def __init__(self, runner: Callable, datasets: List, parent=None):
+        super().__init__(parent)
+        self._runner = runner
+        self._datasets = datasets
+
+    def run(self) -> None:
+        total = len(self._datasets)
+        for completed, ds in enumerate(self._datasets, start=1):
+            try:
+                result = self._runner(ds)
+            except Exception as exc:
+                self.error.emit(ds.key, str(exc))
+            else:
+                self.result_ready.emit(ds.key, result)
+            self.progress.emit(completed, total)

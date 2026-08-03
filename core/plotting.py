@@ -292,6 +292,34 @@ def _add_removed_series(plot_item, x, y, tip_data):
     return scatter
 
 
+def _add_fit_series(container, x, y, color: str):
+    """Draw one dataset's fitted circuit response as a dashed line in that
+    dataset's own color, so a fit is read against the measurement it belongs
+    to. Returns the PlotDataItem, which the caller registers once as the
+    single shared "Fit" legend entry (same reasoning as _add_removed_series).
+
+    Two things this deliberately is not:
+
+    Not hoverable, and never added to the widget's interactive_items. A fit
+    curve is interpolated at an arbitrary number of points per decade and so
+    has no measured-point indices behind it, while the tooltip and the eraser
+    both resolve a click to data["key"]/data["index"]. Letting the eraser
+    hit-test this would mean clicking a fit could mask an unrelated point.
+
+    Not part of the range calculation: added with ignoreBounds=True and kept
+    out of the caller's kept/all coordinate lists, so a fit that diverges
+    can't blow out the framing of the data it is drawn over -- nor, on the
+    Nyquist plot, shift the shared engineering-notation exponent.
+    """
+    item = pg.PlotDataItem(
+        x=x, y=y,
+        pen=pg.mkPen(color, width=1.6, style=Qt.DashLine),
+    )
+    item._eis_role = "fit"
+    container.addItem(item, ignoreBounds=True)
+    return item
+
+
 def _bounds(
     xs: List[float],
     ys: List[float],
@@ -472,6 +500,7 @@ def build_nyquist_plot(
     style: str = "scatter",
     show_removed: bool = False,
     style_map: Optional[Dict[str, Tuple[str, str]]] = None,
+    fit_curves: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
 ) -> pg.PlotWidget:
     """Equal-aspect Nyquist overlay -- the PyQtGraph equivalent of
     core.plotting.plot_single/plot_overlay. Pass a single-item list for the
@@ -482,6 +511,15 @@ def build_nyquist_plot(
     stay readable (see gui.main_window._build_style_map). Datasets missing
     from the map fall back to the plain per-position tab10 cycle and no
     symbol override, which is also what happens when style_map is None.
+
+    fit_curves is an optional ds.key -> (frequencies, complex impedances) of
+    fitted equivalent-circuit responses (see core.ecm), drawn as a dashed
+    line in each dataset's own color. The frequencies travel with the
+    impedances because a fit is interpolated onto its own denser grid rather
+    than evaluated at the measured points -- build_bode_plot needs them for
+    its x axis, and nothing may assume they line up with ds.frequencies.
+    Fit curves are drawn but never hit-tested or ranged over; see
+    _add_fit_series.
 
     Legend entries and hover/click tooltips use each dataset's
     qualified_label (source file + sweep) instead of its bare label whenever
@@ -564,8 +602,9 @@ def build_nyquist_plot(
 
     # The first sweep's removed points, if any: it carries the one shared
     # "Removed" legend entry, registered after the loop so it sorts behind
-    # every sweep instead of among them.
+    # every sweep instead of among them. Fits are handled the same way.
     removed_item = None
+    fit_item = None
     for i, ds in enumerate(datasets):
         if style_map is not None and ds.key in style_map:
             color, symbol = style_map[ds.key]
@@ -584,6 +623,10 @@ def build_nyquist_plot(
         kept_xs.extend(x); kept_ys.extend(y)
         all_xs.extend(x); all_ys.extend(y)
 
+        if fit_curves is not None and ds.key in fit_curves:
+            _, Zf = fit_curves[ds.key]
+            fit_item = _add_fit_series(plot_item, Zf.real, -Zf.imag, color)
+
         if show_removed:
             Zr = ds.data.get_impedances(masked=True)
             fr = ds.data.get_frequencies(masked=True)
@@ -597,6 +640,8 @@ def build_nyquist_plot(
                 removed_item = removed_item or item
                 all_xs.extend(xr); all_ys.extend(yr)
 
+    if fit_item is not None:
+        legend.addItem(fit_item, "Fit")
     if removed_item is not None:
         legend.addItem(removed_item, "Removed")
 
@@ -619,6 +664,7 @@ def build_bode_plot(
     style: str = "scatter",
     show_removed: bool = False,
     style_map: Optional[Dict[str, Tuple[str, str]]] = None,
+    fit_curves: Optional[Dict[str, Tuple[np.ndarray, np.ndarray]]] = None,
 ) -> pg.PlotWidget:
     """|Z| and -phase against frequency: the Bode counterpart of
     build_nyquist_plot, taking the same arguments and exposing the same extra
@@ -645,7 +691,9 @@ def build_bode_plot(
 
     Removed points are drawn on the magnitude axis only: one grey × per point
     is all the eraser needs to click it back, and repeating them on the phase
-    axis only crowds the plot.
+    axis only crowds the plot. Fit curves, unlike removed points, are drawn on
+    both axes -- a circuit is judged on how well it reproduces the phase as
+    much as the magnitude, and the two are what the fit was scored against.
     """
     if not datasets:
         raise ValueError("No datasets provided to plot.")
@@ -743,9 +791,10 @@ def build_bode_plot(
     all_ys: List[float] = []
     phases: List[float] = []
 
-    # As in build_nyquist_plot: the entry is registered after every sweep, so
-    # "Removed" reads last in the legend.
+    # As in build_nyquist_plot: the entries are registered after every sweep,
+    # so "Fit" and "Removed" read last in the legend.
     removed_item = None
+    fit_item = None
     for i, ds in enumerate(datasets):
         # Only the color half of style_map is used -- the marker shape is spoken
         # for here (filled |Z| vs hollow phase), so sweeps from different files
@@ -780,6 +829,16 @@ def build_bode_plot(
         all_xs.extend(x); all_ys.extend(magnitude)
         phases.extend(phase)
 
+        if fit_curves is not None and ds.key in fit_curves:
+            freq_f, Zf = fit_curves[ds.key]
+            xf = np.log10(freq_f)
+            # The magnitude curve carries the shared legend entry; the phase
+            # one lives in the other ViewBox, which the legend can't reach.
+            fit_item = _add_fit_series(
+                plot_item, xf, np.log10(np.abs(Zf)), color
+            )
+            _add_fit_series(phase_view, xf, -np.angle(Zf, deg=True), color)
+
         if show_removed:
             Zr = ds.data.get_impedances(masked=True)
             fr = ds.data.get_frequencies(masked=True)
@@ -796,6 +855,8 @@ def build_bode_plot(
                 removed_item = removed_item or item
                 all_xs.extend(xr); all_ys.extend(magnitude_r)
 
+    if fit_item is not None:
+        legend.addItem(fit_item, "Fit")
     if removed_item is not None:
         legend.addItem(removed_item, "Removed")
 

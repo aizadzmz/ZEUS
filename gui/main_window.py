@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QStackedWidget,
     QTabWidget,
     QToolButton,
@@ -52,10 +54,10 @@ from PySide6.QtWidgets import (
 if TYPE_CHECKING:  # names used only in annotations
     from core import EISParseError
 
-from gui.figure_panes import PgFigureListPane, PgFigurePane
+from gui.figure_panes import CircuitDiagramPane, PgFigureListPane, PgFigurePane
 from gui.generic_import_dialog import GenericImportDialog
-from gui.theme import THEMES, apply_theme
-from gui.workers import DRTWorker, ValidationWorker
+from gui.theme import THEMES, apply_theme, diagram_colors
+from gui.workers import DRTWorker, ECMWorker, ValidationWorker
 
 SIDEBAR_WIDTH = 320
 VALIDATION_METHODS = ("Kramers-Kronig", "Z-HIT")
@@ -71,6 +73,11 @@ DEFAULT_RESIDUALS_LIMIT = 5
 # per file instead of once overall, so a batch of several files doesn't
 # start with everything but the first file's sweeps unchecked.
 DEFAULT_SWEEPS_CHECKED_PER_FILE = 5
+# How many circuit schematics the ECM Parameters tab draws before it stops and
+# points at the text report instead. One per (sweep, fitted circuit), so a
+# batch reaches this quickly, and past a screenful they are all the same
+# picture with different numbers.
+MAX_CIRCUIT_DIAGRAMS = 12
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.ico"
 
 
@@ -182,6 +189,24 @@ class MainWindow(QMainWindow):
         # result_ready signal only carries back (label, result), so this is
         # how _on_drt_worker_result learns what settings produced it.
         self._pending_drt_params: dict = {}
+        # {(canonical cdc, ds.key): FitResult}. Keyed by circuit *and* sweep,
+        # unlike the DRT caches above: picking an equivalent circuit means
+        # trying several and comparing them, so fitting a second circuit to a
+        # sweep has to leave the first one's result in place. Same shape as
+        # _validation_results, and for the same reason.
+        self._ecm_results: Dict[Tuple[str, str], object] = {}
+        # {(canonical cdc, ds.key): effective kwargs} -- see
+        # _validation_params above.
+        self._ecm_params: Dict[Tuple[str, str], dict] = {}
+        # Which of the fitted circuits the two ECM tabs draw. Several may be
+        # cached per sweep; exactly one can be overlaid at a time.
+        self._ecm_shown_cdc: Optional[str] = None
+        self._ecm_worker: Optional[ECMWorker] = None
+        self._ecm_worker_errors: List[Tuple[str, str]] = []
+        # As _pending_drt_params, plus the canonical CDC -- the worker's
+        # result_ready carries only (key, result), but the cache key needs
+        # the circuit too.
+        self._pending_ecm: dict = {}
         # Rebuilding every tab's figures on every checkbox click is O(tabs *
         # selected sweeps) and dominates when overlaying many curves, so tab
         # content is rebuilt lazily: _refresh() does the cheap masking/
@@ -231,9 +256,19 @@ class MainWindow(QMainWindow):
         self.open_session_action.setStatusTip("Restore a previously saved session.")
         self.open_session_action.triggered.connect(self._load_session)
 
+        self.export_bdf_action = QAction("&Export to BDF…", self)
+        self.export_bdf_action.setShortcut("Ctrl+E")
+        self.export_bdf_action.setStatusTip(
+            "Write every sweep and its analysis results as Battery Data Format "
+            "CSV plus a JSON-LD sidecar."
+        )
+        self.export_bdf_action.triggered.connect(self._export_bdf)
+
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self.open_session_action)
         file_menu.addAction(self.save_session_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.export_bdf_action)
 
         # One QAction backs the menu item, the status-bar button, and the
         # shortcut, so their checked states stay in sync automatically.
@@ -263,9 +298,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Open a .mpt, .txt, or .csv file to begin.")
 
     def _build_sidebar(self) -> QWidget:
-        # Plain tuples of option strings; core.drt keeps its pyimpspec imports
-        # inside its functions so reading them here stays free.
+        # Plain tuples of option strings; core.drt and core.ecm keep their
+        # pyimpspec imports inside their functions so reading them here stays
+        # free.
         from core.drt import RBF_TYPES
+        from core.ecm import CIRCUIT_PRESETS, FIT_METHODS, WEIGHT_FORMS
 
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -593,6 +630,116 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(peak_box)
 
+        # 9. ECM fitting
+        ecm_box = QGroupBox("9. ECM fitting")
+        ecm_layout = QVBoxLayout(ecm_box)
+        ecm_box.setToolTip(
+            "Fits an equivalent circuit to each selected sweep by complex "
+            "non-linear least squares."
+        )
+
+        ecm_layout.addWidget(QLabel("Preset circuit"))
+        self.ecm_preset_combo = QComboBox()
+        _add_combo_items(
+            self.ecm_preset_combo, [(f"{name} — {cdc}", cdc) for name, cdc in CIRCUIT_PRESETS]
+        )
+        self.ecm_preset_combo.setToolTip(
+            "Fills the circuit description code below. The code stays "
+            "editable — the preset is only a starting point."
+        )
+        self.ecm_preset_combo.currentIndexChanged.connect(self._on_ecm_preset_changed)
+        ecm_layout.addWidget(self.ecm_preset_combo)
+
+        self.build_from_drt_button = QPushButton("Build circuit from DRT peaks")
+        self.build_from_drt_button.setToolTip(
+            "Derive the circuit from the selected sweep's DRT peak analysis: "
+            "one parallel R-CPE pair per resolved peak, in series with the "
+            "high-frequency resistance, with every value pre-filled from the "
+            "peak's resistance and time constant. Fills the code below — it "
+            "does not fit. Run '8. DRT peak analysis' first."
+        )
+        self.build_from_drt_button.clicked.connect(self._build_circuit_from_drt)
+        ecm_layout.addWidget(self.build_from_drt_button)
+
+        ecm_layout.addWidget(QLabel("Circuit description code"))
+        self.ecm_cdc_edit = QLineEdit()
+        self.ecm_cdc_edit.setToolTip(
+            "Boukamp notation: parentheses are parallel connections, square "
+            "brackets series ones, so R(RC) is a resistor in series with a "
+            "parallel RC pair. Elements: R C L Q W Ws Wo G H Zarc and the "
+            "transmission-line family. Initial values and bounds can be "
+            "pinned inline, e.g. R{R=5}(R{R=100/1/1e4}C)."
+        )
+        self.ecm_cdc_edit.textChanged.connect(self._on_ecm_cdc_changed)
+        ecm_layout.addWidget(self.ecm_cdc_edit)
+
+        self.ecm_cdc_status_label = QLabel()
+        self.ecm_cdc_status_label.setWordWrap(True)
+        ecm_layout.addWidget(self.ecm_cdc_status_label)
+
+        method_row = QHBoxLayout()
+        method_row.addWidget(QLabel("Method"))
+        self.ecm_method_combo = QComboBox()
+        _add_combo_items(self.ecm_method_combo, [(m, m) for m in FIT_METHODS])
+        self.ecm_method_combo.setToolTip(
+            "'least_squares' is fast and always reports parameter error "
+            "bars. 'auto' tries every method and keeps the best-scoring one "
+            "— several times slower, and the winner is often a gradient-free "
+            "method that reports no error bars at all."
+        )
+        method_row.addWidget(self.ecm_method_combo, stretch=1)
+        ecm_layout.addLayout(method_row)
+
+        weight_row = QHBoxLayout()
+        weight_row.addWidget(QLabel("Weight"))
+        self.ecm_weight_combo = QComboBox()
+        _add_combo_items(self.ecm_weight_combo, [(w, w) for w in WEIGHT_FORMS])
+        self.ecm_weight_combo.setToolTip(
+            "How each residual is weighted. 'boukamp' (1/|Z|²) is the EIS "
+            "standard and stops the high-impedance end of the spectrum from "
+            "dominating the fit."
+        )
+        weight_row.addWidget(self.ecm_weight_combo, stretch=1)
+        ecm_layout.addLayout(weight_row)
+
+        self.ecm_seed_check = QCheckBox("Seed fit from previous sweep")
+        self.ecm_seed_check.setToolTip(
+            "Start each fit from the previous sweep's fitted values instead "
+            "of the generic defaults. Helps convergence across a cycling or "
+            "degradation series, where consecutive spectra are similar — but "
+            "one bad fit then seeds the next."
+        )
+        ecm_layout.addWidget(self.ecm_seed_check)
+
+        self.run_ecm_button = QPushButton("Fit circuit")
+        self.run_ecm_button.clicked.connect(self._run_ecm_fit)
+        ecm_layout.addWidget(self.run_ecm_button)
+
+        self.ecm_shown_label = QLabel("Show fit")
+        ecm_layout.addWidget(self.ecm_shown_label)
+        self.ecm_shown_combo = QComboBox()
+        self.ecm_shown_combo.setToolTip(
+            "Which fitted circuit the ECM tab overlays. Every circuit you "
+            "fit is kept, so you can switch between them to compare."
+        )
+        self.ecm_shown_combo.currentIndexChanged.connect(self._on_ecm_shown_changed)
+        ecm_layout.addWidget(self.ecm_shown_combo)
+        self.ecm_shown_status_label = QLabel()
+        ecm_layout.addWidget(self.ecm_shown_status_label)
+
+        layout.addWidget(ecm_box)
+        # Seed the CDC box from the first preset with signals blocked. Letting
+        # textChanged fire here would call validate_cdc -> parse_cdc, paying
+        # the ~4 s pyimpspec import synchronously while the window is still
+        # being built -- the exact cost this module's import policy exists to
+        # avoid. Validation runs on the first edit instead, by which point
+        # gui/app.py's warm-up thread has made the import free; a code that is
+        # never edited is validated by _run_ecm_fit before the batch starts.
+        self.ecm_cdc_edit.blockSignals(True)
+        self.ecm_cdc_edit.setText(CIRCUIT_PRESETS[0][1])
+        self.ecm_cdc_edit.blockSignals(False)
+        self._update_ecm_shown_combo()
+
         layout.addStretch()
         self._update_validation_button_text()
 
@@ -632,13 +779,26 @@ class MainWindow(QMainWindow):
         self.drt_pane = PgFigurePane(with_overlay_actions=False)
         self.drt_peaks_text = QPlainTextEdit()
         self.drt_peaks_text.setReadOnly(True)
+        # Overlay actions (Replot/Auto-Scale) but no eraser: set_eraser_enabled
+        # is only ever called on visual_pane, and point_mask_toggled is left
+        # unconnected here, so clicking a fit curve can't mask anything.
+        self.ecm_pane = PgFigurePane(with_overlay_actions=True)
+        self.ecm_pane.replot_requested.connect(self._force_replot_ecm)
+        self.ecm_circuit_pane = CircuitDiagramPane()
+        self.ecm_params_text = QPlainTextEdit()
+        self.ecm_params_text.setReadOnly(True)
         self.details_text = QPlainTextEdit()
         self.details_text.setReadOnly(True)
-        self.tabs.addTab(self._build_visual_tab(), "Visual")
-        self.tabs.addTab(self._build_residuals_tab(), "Residuals")
-        self.tabs.addTab(self.drt_pane, "DRT")
-        self.tabs.addTab(self.drt_peaks_text, "DRT Peaks")
-        self.tabs.addTab(self.details_text, "Sweep details")
+        # Tab order is positional everywhere below (_tab_dirty, the setTabText
+        # counts in _refresh, and the index chain in _render_active_tab), so
+        # inserting a tab means updating all of those together.
+        self.tabs.addTab(self._build_visual_tab(), "Visual")       # 0
+        self.tabs.addTab(self._build_residuals_tab(), "Residuals") # 1
+        self.tabs.addTab(self.drt_pane, "DRT")                     # 2
+        self.tabs.addTab(self.drt_peaks_text, "DRT Peaks")         # 3
+        self.tabs.addTab(self.ecm_pane, "ECM")                     # 4
+        self.tabs.addTab(self._build_ecm_params_tab(), "ECM Parameters")  # 5
+        self.tabs.addTab(self.details_text, "Sweep details")       # 6
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.stack.addWidget(self.tabs)
 
@@ -683,6 +843,33 @@ class MainWindow(QMainWindow):
         col.addLayout(header)
         col.addWidget(self.visual_pane, stretch=1)
         return container
+
+    def _build_ecm_params_tab(self) -> QWidget:
+        """The fitted circuit drawn with each component's value written under
+        it, over the full text report.
+
+        The schematic is the primary view: a circuit description code says
+        nothing about which fitted resistance belongs to which arc, and a
+        flat parameter table only names elements ("R_2"), so reading one
+        against the other is a lookup the drawing removes. The text below is
+        still where the whole story lives -- absolute standard errors, units,
+        which parameters were held fixed, and the fit statistics -- so the two
+        share a splitter the user can drag either way rather than the table
+        being replaced outright."""
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self.ecm_circuit_pane)
+        splitter.addWidget(self.ecm_params_text)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        # Stretch factors only divide up *changes* in height; without an
+        # explicit starting split the schematics would open squeezed into
+        # their size hint with the report taking the rest.
+        splitter.setSizes([3, 2])
+        # Neither half may be dragged shut: a collapsed pane looks like the
+        # tab lost half its content, with only a thin handle to suggest
+        # otherwise.
+        splitter.setChildrenCollapsible(False)
+        return splitter
 
     def _build_residuals_tab(self) -> QWidget:
         """The residuals list, above it a header that decides how much of the
@@ -903,6 +1090,9 @@ class MainWindow(QMainWindow):
         self._drt_results = {}
         self._drt_params = {}
         self._drt_peaks = {}
+        self._ecm_results = {}
+        self._ecm_params = {}
+        self._ecm_shown_cdc = None
         self._manual_masked = {}
         self._manual_kept = {}
         # Nothing validated yet, so start the Residuals tab blank again
@@ -1044,6 +1234,14 @@ class MainWindow(QMainWindow):
         self._drt_results = {k: v for k, v in self._drt_results.items() if k not in removed_keys}
         self._drt_params = {k: v for k, v in self._drt_params.items() if k not in removed_keys}
         self._drt_peaks = {k: v for k, v in self._drt_peaks.items() if k not in removed_keys}
+        # Keyed by (cdc, ds.key), so the sweep is the second half -- as with
+        # _validation_results above.
+        self._ecm_results = {
+            k: v for k, v in self._ecm_results.items() if k[1] not in removed_keys
+        }
+        self._ecm_params = {
+            k: v for k, v in self._ecm_params.items() if k[1] not in removed_keys
+        }
         self._manual_masked = {
             k: v for k, v in self._manual_masked.items() if k not in removed_keys
         }
@@ -1061,7 +1259,14 @@ class MainWindow(QMainWindow):
             self.residuals_pane.clear()
             self.drt_pane.clear()
             self.drt_peaks_text.clear()
+            self.ecm_pane.clear()
+            self.ecm_circuit_pane.clear()
+            self.ecm_params_text.clear()
             self.details_text.clear()
+            # This branch returns without reaching _refresh(), which is what
+            # normally repopulates the circuit picker -- so do it here, or the
+            # sidebar goes on offering circuits fitted to the file just removed.
+            self._update_ecm_shown_combo()
             self._pending = None
             self._tab_dirty.clear()
             return
@@ -1125,12 +1330,54 @@ class MainWindow(QMainWindow):
                 self._validation_params,
                 self._drt_params,
                 ui_state,
+                self._ecm_results,
+                self._ecm_params,
             )
         except Exception as exc:
             QMessageBox.critical(self, "Save session", f"Could not save session:\n{exc}")
             return
 
         self.statusBar().showMessage(f"Session saved to '{Path(path).name}'.")
+
+    def _export_bdf(self) -> None:
+        """Write every loaded sweep, and whatever analyses have been run, as
+        Battery Data Format files.
+
+        Asks for a directory rather than a filename: one sweep produces a
+        spectrum, a sidecar, and a companion table per analysis, so a batch is
+        always many files.
+        """
+        if not self._datasets:
+            QMessageBox.information(self, "Export to BDF", "Open a file first.")
+            return
+
+        directory = QFileDialog.getExistingDirectory(self, "Export to BDF")
+        if not directory:
+            return
+
+        from core.bdf_export import export_batch
+
+        try:
+            written = export_batch(
+                directory,
+                self._datasets,
+                files=self._files,
+                validation_results=self._validation_results,
+                validation_params=self._validation_params,
+                drt_results=self._drt_results,
+                drt_params=self._drt_params,
+                drt_peaks=self._drt_peaks,
+                ecm_results=self._ecm_results,
+                ecm_params=self._ecm_params,
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export to BDF", f"Could not export:\n{exc}")
+            return
+
+        self.statusBar().showMessage(
+            f"Exported {len(written)} file(s) for {len(self._datasets)} sweep(s) "
+            f"to '{Path(directory).name}'."
+        )
 
     def _load_session(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -1150,6 +1397,8 @@ class MainWindow(QMainWindow):
                 validation_params,
                 drt_params,
                 ui_state,
+                ecm_results,
+                ecm_params,
             ) = load_session(path)
         except Exception as exc:
             QMessageBox.critical(self, "Open session", f"Could not open session:\n{exc}")
@@ -1163,6 +1412,12 @@ class MainWindow(QMainWindow):
         self._drt_results = drt_results
         self._drt_params = drt_params
         self._drt_peaks = drt_peaks
+        self._ecm_results = ecm_results
+        self._ecm_params = ecm_params
+        # Left for _update_ecm_shown_combo to settle on the first fitted
+        # circuit -- the displayed one isn't part of the saved session, same
+        # as the active tab and the Nyquist/Bode choice.
+        self._ecm_shown_cdc = None
         self._manual_masked = ui_state["manual_masked"]
         self._manual_kept = ui_state["manual_kept"]
         # Same reasoning as a fresh file load: nothing has been plotted yet
@@ -1497,6 +1752,276 @@ class MainWindow(QMainWindow):
         )
         self._refresh()
 
+    # ----------------------------------------------------------------- ECM
+
+    def _on_ecm_preset_changed(self, _index: int) -> None:
+        """Preset -> CDC box. One-way: editing the code afterwards leaves the
+        combo showing whatever was last picked rather than switching it to a
+        'custom' entry, since the text box is the source of truth and the
+        combo is only a way to fill it."""
+        self.ecm_cdc_edit.setText(self.ecm_preset_combo.currentData())
+
+    def _build_circuit_from_drt(self) -> None:
+        """Fill the CDC box from a DRT peak analysis.
+
+        Deliberately stops at filling it: the generated circuit is a
+        hypothesis derived from one sweep, so it gets shown (and live
+        validated, and edited if need be) before any batch is spent on it.
+
+        The circuit comes from the first selected sweep that has peaks, since
+        one code is fitted to the whole selection -- which sweep it came from
+        is named in the status bar rather than left implicit."""
+        from core.ecm import circuit_from_drt_peaks, series_resistance
+
+        selected = self._selected_datasets()
+        source = next((ds for ds in selected if ds.key in self._drt_peaks), None)
+        if source is None:
+            QMessageBox.information(
+                self,
+                "Build circuit from DRT",
+                "No DRT peak analysis for the selected sweep(s).\n\n"
+                "Run a DRT calculation (7) and then 'Peak deconvolution' (8) "
+                "first — the peaks are what decide how many RC elements the "
+                "circuit needs.",
+            )
+            return
+
+        try:
+            cdc = circuit_from_drt_peaks(
+                self._drt_peaks[source.key], series_resistance(source)
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Build circuit from DRT", str(exc))
+            return
+
+        self.ecm_cdc_edit.setText(cdc)
+        num_pairs = cdc.count("(")
+        self.statusBar().showMessage(
+            f"Circuit built from {self._display_label(source)}: "
+            f"{num_pairs} R-CPE pair(s) + series R."
+        )
+
+    def _on_ecm_cdc_changed(self, text: str) -> None:
+        """Live-validate the circuit code, so a typo is caught before a batch
+        is spent on it rather than as one identical error per sweep."""
+        from core.ecm import validate_cdc
+
+        ok, message = validate_cdc(text)
+        color = "#1a7f37" if ok else "#b42318"
+        self.ecm_cdc_status_label.setText(message)
+        self.ecm_cdc_status_label.setStyleSheet(f"color: {color};")
+        self.run_ecm_button.setEnabled(ok)
+
+        # The ECM Parameters tab previews this code as a schematic while
+        # nothing is fitted, so a keystroke here changes what it draws.
+        # Marking it dirty is enough on its own (it is rebuilt on the way
+        # back to it, like every other tab); the immediate redraw is only for
+        # the preview, and is skipped once the selection has fits to show,
+        # because that render also rebuilds the whole text report -- per
+        # keystroke, across every fit, which is what would make typing lag.
+        self._tab_dirty.add(5)
+        fitted_keys = {key for _, key in self._ecm_results}
+        previewing = self._pending is None or not any(
+            ds.key in fitted_keys for ds in self._pending["selected"]
+        )
+        if previewing:
+            self._render_active_tab()
+
+    def _on_ecm_shown_changed(self, _index: int) -> None:
+        """Switch which fitted circuit the ECM tabs draw.
+
+        Goes through the full _refresh() rather than just marking the two ECM
+        tabs dirty: the fit curves live in _pending, computed for whichever
+        circuit was displayed at the time, so re-rendering alone would redraw
+        the new circuit's title over the old circuit's curves."""
+        data = self.ecm_shown_combo.currentData()
+        if data is None or data == self._ecm_shown_cdc:
+            return
+        self._ecm_shown_cdc = data
+        self._refresh()
+
+    def _update_ecm_shown_combo(self) -> None:
+        """Repopulate the circuit picker from whatever has been fitted, and
+        report how much of the current selection the chosen one covers.
+
+        Signals are blocked while rebuilding: clear()/addItem() each emit
+        currentIndexChanged, which would otherwise reset _ecm_shown_cdc to the
+        first circuit in the list every time the selection changed."""
+        fitted = sorted({cdc for cdc, _ in self._ecm_results})
+        if self._ecm_shown_cdc not in fitted:
+            self._ecm_shown_cdc = fitted[0] if fitted else None
+
+        self.ecm_shown_combo.blockSignals(True)
+        self.ecm_shown_combo.clear()
+        _add_combo_items(self.ecm_shown_combo, [(cdc, cdc) for cdc in fitted])
+        if self._ecm_shown_cdc is not None:
+            self.ecm_shown_combo.setCurrentIndex(fitted.index(self._ecm_shown_cdc))
+        self.ecm_shown_combo.blockSignals(False)
+
+        has_fits = bool(fitted)
+        self.ecm_shown_label.setVisible(has_fits)
+        self.ecm_shown_combo.setVisible(has_fits)
+        self.ecm_shown_status_label.setVisible(has_fits)
+        if has_fits:
+            selected = self._selected_datasets()
+            covered = sum(
+                1 for ds in selected if (self._ecm_shown_cdc, ds.key) in self._ecm_results
+            )
+            self.ecm_shown_status_label.setText(
+                f"{covered} of {len(selected)} selected sweep(s) fitted"
+            )
+
+    def _ecm_settings(self) -> dict:
+        """Fit settings read from the '9. ECM fitting' panel, minus the
+        circuit itself (which is tracked separately -- it's half the cache
+        key, not just a setting)."""
+        return dict(
+            method=self.ecm_method_combo.currentData(),
+            weight=self.ecm_weight_combo.currentData(),
+        )
+
+    def _run_ecm_fit(self) -> None:
+        selected = self._selected_datasets()
+        if not selected:
+            return
+
+        from core.ecm import canonical_cdc, run_ecm_fit, run_ecm_fit_seeded
+
+        cdc = self.ecm_cdc_edit.text().strip()
+        try:
+            canonical = canonical_cdc(cdc)
+        except Exception as exc:
+            QMessageBox.warning(self, "Invalid circuit", str(exc))
+            return
+
+        settings = self._ecm_settings()
+        seed = self.ecm_seed_check.isChecked()
+
+        if seed:
+            # A one-element list rather than a plain name so the closure can
+            # rebind it: each fit seeds the next, which is also why ECMWorker
+            # runs the batch serially and in order.
+            previous = [None]
+
+            def runner(ds):
+                result = run_ecm_fit_seeded(ds, cdc, previous[0], **settings)
+                previous[0] = result
+                return result
+        else:
+            def runner(ds):
+                return run_ecm_fit(ds, cdc, **settings)
+
+        self._pending_ecm = dict(cdc=canonical, params=dict(settings, cdc=cdc, seeded=seed))
+        self._ecm_worker_errors = []
+        self._ecm_worker = ECMWorker(runner, selected, parent=self)
+        self._ecm_worker.result_ready.connect(self._on_ecm_result)
+        self._ecm_worker.error.connect(self._on_ecm_error)
+        self._ecm_worker.progress.connect(self._on_ecm_progress)
+        self._ecm_worker.finished.connect(self._on_ecm_finished)
+        # Masks must not move while the worker is reading them, same as the
+        # validation run.
+        self._sidebar.setEnabled(False)
+        self.statusBar().showMessage(
+            f"Fitting {canonical}… 0 of {len(selected)}"
+        )
+        self._ecm_worker.start()
+
+    def _on_ecm_result(self, key: str, result) -> None:
+        cdc = self._pending_ecm["cdc"]
+        self._ecm_results[(cdc, key)] = result
+        self._ecm_params[(cdc, key)] = self._pending_ecm["params"]
+
+    def _on_ecm_error(self, key: str, message: str) -> None:
+        self._ecm_worker_errors.append((key, message))
+
+    def _on_ecm_progress(self, completed: int, total: int) -> None:
+        self.statusBar().showMessage(
+            f"Fitting {self._pending_ecm['cdc']}… {completed} of {total}"
+        )
+
+    def _on_ecm_finished(self) -> None:
+        self._ecm_worker = None
+        self._sidebar.setEnabled(True)
+        # Show what was just fitted, rather than leaving the tabs on whichever
+        # circuit happened to be selected before.
+        self._ecm_shown_cdc = self._pending_ecm["cdc"]
+        failed = len(self._ecm_worker_errors)
+        self.statusBar().showMessage(
+            f"Circuit fitting finished ({failed} failed)." if failed
+            else "Circuit fitting finished."
+        )
+        if self._ecm_worker_errors:
+            details = "\n".join(
+                f"- {self._display_label(key)}: {msg}"
+                for key, msg in self._ecm_worker_errors
+            )
+            QMessageBox.warning(self, "ECM errors", f"Some sweeps failed:\n{details}")
+        self._refresh()
+
+    def _render_ecm_circuits(self, fits: List[Tuple[str, object]]) -> None:
+        """Draw the schematics at the top of the ECM Parameters tab: one per
+        (sweep, fitted circuit) in `fits`, captioned and annotated with that
+        fit's values.
+
+        With nothing fitted, falls back to a preview of whatever circuit
+        description code is in the sidebar, drawn with its initial values in
+        a muted color. That is what makes the tab worth opening *before* a
+        fit — it's where you check that the code you typed is the circuit you
+        meant — and it's why _on_ecm_cdc_changed redraws this.
+        """
+        from core.circuit_diagram import build_fit_diagram, build_preview_diagram
+
+        colors = diagram_colors(self._theme_mode)
+        if not fits:
+            cdc = self.ecm_cdc_edit.text().strip()
+            try:
+                svg = build_preview_diagram(
+                    cdc, foreground=colors["wire"], accent=colors["muted"]
+                )
+            except Exception:
+                # A half-typed code is the normal state of the box, not an
+                # error worth a dialog; the sidebar's own status label is
+                # already saying what is wrong with it.
+                self.ecm_circuit_pane.set_message(
+                    "Enter a valid circuit description code in the sidebar to "
+                    "preview the circuit, then click 'Fit circuit'."
+                )
+                return
+            self.ecm_circuit_pane.set_diagrams(
+                [(f"{cdc} — not fitted yet (initial values)", svg)]
+            )
+            return
+
+        # Capped rather than paged: every fit is already listed in full in
+        # the report below, and a batch of 50 sweeps would otherwise put 50
+        # schematics of the same circuit in one scroll.
+        shown = fits[:MAX_CIRCUIT_DIAGRAMS]
+        self.ecm_circuit_pane.set_diagrams(
+            [
+                (
+                    f"{label} — {result.circuit.to_string()}"
+                    f"   χ² = {result.pseudo_chisqr:.4g}",
+                    build_fit_diagram(
+                        result, foreground=colors["wire"], accent=colors["value"]
+                    ),
+                )
+                for label, result in shown
+            ]
+        )
+        if len(fits) > len(shown):
+            self.ecm_circuit_pane.add_note(
+                f"… and {len(fits) - len(shown)} more fit(s), listed in the "
+                f"report below. Narrow the sweep selection to draw them."
+            )
+
+    def _force_replot_ecm(self) -> None:
+        """Rebuild the ECM tab from current state, bypassing the dirty check
+        -- the plot-area 'Replot' button, mirroring _force_replot_visual."""
+        if self._pending is None:
+            return
+        self._tab_dirty.add(4)
+        self._render_active_tab()
+
     # ------------------------------------------------------------- refresh
 
     def _refresh(self) -> None:
@@ -1522,7 +2047,14 @@ class MainWindow(QMainWindow):
             self.residuals_pane.clear()
             self.drt_pane.clear()
             self.drt_peaks_text.clear()
+            self.ecm_pane.clear()
+            self.ecm_circuit_pane.clear()
+            self.ecm_params_text.clear()
             self.details_text.clear()
+            # Returns before the repopulation further down, so the picker's
+            # "N of M selected sweeps fitted" count would otherwise describe
+            # the previous selection.
+            self._update_ecm_shown_combo()
             self._pending = None
             self._tab_dirty.clear()
             # Stays armed: unchecking the last sweep and rechecking one is a
@@ -1580,11 +2112,34 @@ class MainWindow(QMainWindow):
             for ds in selected
             if ds.key in self._drt_results
         ]
+        # Repopulate the circuit picker before reading _ecm_shown_cdc below:
+        # it settles which circuit is displayed when the previous choice has
+        # been removed along with its file.
+        self._update_ecm_shown_combo()
+        shown_cdc = self._ecm_shown_cdc
+        ecm_selected = [ds for ds in selected if (shown_cdc, ds.key) in self._ecm_results]
+        # (frequencies, impedances) per sweep: a fit is interpolated onto its
+        # own denser grid, so the plot builders need both -- see
+        # core.plotting.build_nyquist_plot.
+        ecm_curves = {
+            ds.key: (
+                self._ecm_results[(shown_cdc, ds.key)].get_frequencies(num_per_decade=100),
+                self._ecm_results[(shown_cdc, ds.key)].get_impedances(num_per_decade=100),
+            )
+            for ds in ecm_selected
+        }
+        # The Parameters tab lists every circuit fitted to a sweep, not just
+        # the displayed one, so its count is over sweeps with any fit at all.
+        ecm_fitted_keys = {key for _, key in self._ecm_results}
+        ecm_fitted_any = sum(1 for ds in selected if ds.key in ecm_fitted_keys)
+
         self.tabs.setTabText(1, f"Residuals ({len(validated_selected)})")
         self.tabs.setTabText(2, f"DRT ({len(drt_selected)})")
         self.tabs.setTabText(
             3, f"DRT Peaks ({sum(1 for ds in selected if ds.key in self._drt_peaks)})"
         )
+        self.tabs.setTabText(4, f"ECM ({len(ecm_selected)})")
+        self.tabs.setTabText(5, f"ECM Parameters ({ecm_fitted_any})")
 
         self._pending = dict(
             selected=selected,
@@ -1592,8 +2147,10 @@ class MainWindow(QMainWindow):
             threshold=threshold,
             validated_selected=validated_selected,
             drt_selected=drt_selected,
+            ecm_curves=ecm_curves,
+            ecm_shown_cdc=shown_cdc,
         )
-        self._tab_dirty = {0, 1, 2, 3, 4}
+        self._tab_dirty = {0, 1, 2, 3, 4, 5, 6}
         # _residuals_armed deliberately survives this. Marking the tab dirty
         # is enough: the redraw is deferred until the Residuals tab is the
         # visible one, so a checkbox click from another tab still costs
@@ -1727,12 +2284,59 @@ class MainWindow(QMainWindow):
             self.drt_peaks_text.setPlainText("\n".join(peak_lines))
 
         elif index == 4:
+            if p["ecm_curves"]:
+                build = (
+                    build_nyquist_plot if self._visual_view == "Nyquist" else build_bode_plot
+                )
+                widget_ecm = build(
+                    p["selected"],
+                    title=f"Circuit fit — {p['ecm_shown_cdc']}",
+                    style=self._style,
+                    show_removed=False,
+                    style_map=self._build_style_map(),
+                    fit_curves=p["ecm_curves"],
+                )
+                self.ecm_pane.set_widget(widget_ecm)
+            else:
+                self.ecm_pane.clear()
+
+        elif index == 5:
+            # Every circuit fitted to each sweep, best chi-squared first --
+            # comparing candidate circuits is the point of keying the cache
+            # by circuit as well as sweep.
+            from core.ecm import format_fit_report
+
+            report_lines = []
+            fits_by_sweep = []
+            for ds in p["selected"]:
+                fits = sorted(
+                    (
+                        (result.pseudo_chisqr, cdc, result)
+                        for (cdc, key), result in self._ecm_results.items()
+                        if key == ds.key
+                    ),
+                    key=lambda item: item[0],
+                )
+                for _, _, result in fits:
+                    report_lines.append(format_fit_report(result, self._display_label(ds)))
+                    fits_by_sweep.append((self._display_label(ds), result))
+            self.ecm_params_text.setPlainText("\n".join(report_lines))
+            self._render_ecm_circuits(fits_by_sweep)
+
+        elif index == 6:
             lines = []
             for ds in p["selected"]:
                 validated_with = [
                     m for m in VALIDATION_METHODS if (m, ds.key) in self._validation_results
                 ]
                 note = f" (validated: {', '.join(validated_with)})" if validated_with else ""
+                fitted_with = sorted(
+                    f"{cdc} χ²={result.pseudo_chisqr:.3g}"
+                    for (cdc, key), result in self._ecm_results.items()
+                    if key == ds.key
+                )
+                if fitted_with:
+                    note += f" (fitted: {'; '.join(fitted_with)})"
                 lines.append(f"{self._display_label(ds)} — {ds.num_points} points{note}")
             self.details_text.setPlainText("\n".join(lines))
 

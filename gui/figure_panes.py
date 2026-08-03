@@ -1,10 +1,20 @@
-"""Widgets that host PyQtGraph plots inside Qt layouts."""
+"""Widgets that host PyQtGraph plots (and circuit schematics) inside Qt
+layouts."""
 
 from typing import List, Optional, Tuple
 
 import pyqtgraph as pg
-from PySide6.QtCore import QPointF, Qt, QTimer, Signal
-from PySide6.QtWidgets import QScrollArea, QToolButton, QVBoxLayout, QWidget
+from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QPainter
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import (
+    QLabel,
+    QScrollArea,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from core.plotting import point_tip
 
@@ -332,6 +342,133 @@ class PgFigurePane(QWidget):
             self._layout.removeWidget(self._widget)
             self._widget.deleteLater()
             self._widget = None
+
+
+# How far past its natural size a schematic is allowed to be blown up. It is
+# vector art, so it stays crisp at any scale, but a two-element circuit
+# stretched across a wide window reads as a poster rather than as a figure.
+MAX_DIAGRAM_SCALE = 1.8
+
+
+class SvgFigure(QWidget):
+    """One SVG drawn at the width it is told to use, keeping its aspect ratio.
+
+    Height is set explicitly (set_display_width) rather than reported through
+    heightForWidth: the diagrams live in a QScrollArea, and a scroll area
+    sizes its widget from plain size hints without consulting
+    heightForWidth, so a column of aspect-ratio-only figures gets squeezed
+    into the viewport and painted on top of each other. A fixed height per
+    figure is what makes the column add up to something the scroll area can
+    scroll.
+    """
+
+    def __init__(self, svg: bytes, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._renderer = QSvgRenderer(QByteArray(svg))
+        natural = self._renderer.defaultSize()
+        # 1x1 rather than 0x0 so the aspect divisions below are always safe,
+        # which is what an unparseable SVG would otherwise leave here.
+        self._natural = natural if natural.width() > 0 and natural.height() > 0 else QSize(1, 1)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.set_display_width(self._natural.width())
+
+    def set_display_width(self, width: int) -> None:
+        """Draw at `width` px (clamped to the legible range) and take exactly
+        the height that implies."""
+        self._drawn_width = max(
+            self._natural.width() // 2,
+            min(int(width), int(self._natural.width() * MAX_DIAGRAM_SCALE)),
+        )
+        self.setFixedHeight(
+            round(self._drawn_width * self._natural.height() / self._natural.width())
+        )
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        # Centered, so a narrow circuit in a wide pane doesn't sit off to one
+        # side of its caption.
+        painter.translate(max(0, (self.width() - self._drawn_width) / 2), 0)
+        self._renderer.render(painter, QRectF(0, 0, self._drawn_width, self.height()))
+        painter.end()
+
+
+class CircuitDiagramPane(QScrollArea):
+    """A scrollable column of captioned circuit schematics, used by the ECM
+    Parameters tab. Also shows a plain message on its own (set_message) for
+    the states that have no diagram to draw: nothing fitted yet, or a circuit
+    description code that doesn't parse."""
+
+    MARGIN = 12
+
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self._container = QWidget()
+        self._layout = QVBoxLayout(self._container)
+        self._layout.setContentsMargins(self.MARGIN, 8, self.MARGIN, 8)
+        self._layout.setSpacing(4)
+        self._layout.addStretch()
+        self.setWidget(self._container)
+        self._items: List[QWidget] = []
+        self._figures: List[SvgFigure] = []
+
+    def set_diagrams(self, diagrams: List[Tuple[str, bytes]]) -> None:
+        """Replace the contents with (caption, svg) pairs, in order."""
+        self.clear()
+        for caption, svg in diagrams:
+            label = QLabel(caption)
+            label.setStyleSheet("font-weight: 600; padding-top: 6px;")
+            label.setWordWrap(True)
+            self._add(label)
+            figure = SvgFigure(svg)
+            self._figures.append(figure)
+            self._add(figure)
+        self._resize_figures()
+
+    def set_message(self, text: str) -> None:
+        self.clear()
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setAlignment(Qt.AlignCenter)
+        label.setStyleSheet("padding: 24px;")
+        self._add(label)
+
+    def add_note(self, text: str) -> None:
+        """Append a line of plain text under the diagrams already set, for
+        saying what was left undrawn."""
+        label = QLabel(text)
+        label.setWordWrap(True)
+        label.setStyleSheet("padding-top: 12px;")
+        self._add(label)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._resize_figures()
+
+    def _resize_figures(self) -> None:
+        width = self.viewport().width() - 2 * self.MARGIN
+        for figure in self._figures:
+            figure.set_display_width(width)
+
+    def _add(self, widget: QWidget) -> None:
+        # insert above the trailing stretch, which keeps a short column of
+        # diagrams pinned to the top instead of spread down the pane
+        self._layout.insertWidget(self._layout.count() - 1, widget)
+        self._items.append(widget)
+
+    def clear(self) -> None:
+        for widget in self._items:
+            self._layout.removeWidget(widget)
+            # Unparented as well as delisted: deleteLater only schedules the
+            # destruction, and until the event loop gets to it a widget that
+            # is merely out of the layout keeps its parent -- and goes on
+            # painting itself where it last sat, under the replacements.
+            widget.setParent(None)
+            widget.deleteLater()
+        self._items = []
+        self._figures = []
 
 
 class PgFigureListPane(QScrollArea):

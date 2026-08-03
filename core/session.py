@@ -21,10 +21,11 @@ import numpy as np
 from pyimpspec import DataSet, KramersKronigResult, ZHITResult, parse_cdc
 from pyimpspec.analysis.drt import BHTResult, TRRBFResult
 from pyimpspec.analysis.drt.peak_analysis import DRTPeak, DRTPeaks
+from pyimpspec.analysis.fitting import FitResult, FittedParameter
 
 from core.io_utils import EISDataset
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _GZIP_MAGIC = b"\x1f\x8b"
 
 
@@ -225,6 +226,99 @@ def drt_peaks_from_dict(d: dict) -> DRTPeaks:
     )
 
 
+# ---- ECM (equivalent circuit fits) ----
+# FitResult is the one result type here that holds a live third-party object:
+# an lmfit MinimizerResult, which is not JSON-serializable. Everything the app
+# actually reads off it is a handful of scalars (FitResult.to_statistics_
+# dataframe uses exactly the seven below), so those are stored and handed back
+# via the stand-in class -- which keeps to_statistics_dataframe() working on a
+# reloaded session instead of raising on a None. What does not survive is the
+# rest of lmfit's machinery: the covariance matrix, the parameter correlations,
+# and the ability to resume or refine the fit. Reloading gives you the fitted
+# curve, its parameters with their error bars, and its statistics; refitting is
+# what you do if you need more than that.
+
+
+class _RestoredMinimizerResult:
+    """The scalars FitResult reads off lmfit's MinimizerResult, restored from
+    a saved session. Not an lmfit object and not a substitute for one -- see
+    the note above."""
+
+    def __init__(self, chisqr, redchi, aic, bic, nfree, ndata, nfev):
+        self.chisqr = chisqr
+        self.redchi = redchi
+        self.aic = aic
+        self.bic = bic
+        self.nfree = nfree
+        self.ndata = ndata
+        self.nfev = nfev
+
+
+def fit_result_to_dict(result: FitResult) -> dict:
+    m = result.minimizer_result
+    return {
+        # serialize() (not to_string()) so the fitted values travel with the
+        # topology -- that is what makes the reloaded circuit reproduce the
+        # curve rather than just its shape.
+        "circuit_cdc": result.circuit.serialize(),
+        "parameters": {
+            element: {
+                symbol: {
+                    "value": float(p.value),
+                    # stderr is NaN whenever the fitting method produced no
+                    # covariance matrix (see core.ecm.run_ecm_fit). JSON has no
+                    # NaN under allow_nan=False, so it travels as None.
+                    "stderr": None if p.stderr != p.stderr else float(p.stderr),
+                    "fixed": bool(p.fixed),
+                    "unit": p.unit,
+                }
+                for symbol, p in params.items()
+            }
+            for element, params in result.parameters.items()
+        },
+        "frequencies": _real_array(result.frequencies),
+        "impedances": _complex_array(result.impedances),
+        "residuals": _complex_array(result.residuals),
+        "pseudo_chisqr": result.pseudo_chisqr,
+        "method": result.method,
+        "weight": result.weight,
+        "statistics": {
+            "chisqr": m.chisqr,
+            "redchi": m.redchi,
+            "aic": m.aic,
+            "bic": m.bic,
+            "nfree": m.nfree,
+            "ndata": m.ndata,
+            "nfev": m.nfev,
+        },
+    }
+
+
+def fit_result_from_dict(d: dict) -> FitResult:
+    return FitResult(
+        circuit=parse_cdc(d["circuit_cdc"]),
+        parameters={
+            element: {
+                symbol: FittedParameter(
+                    value=p["value"],
+                    stderr=float("nan") if p["stderr"] is None else p["stderr"],
+                    fixed=p["fixed"],
+                    unit=p["unit"],
+                )
+                for symbol, p in params.items()
+            }
+            for element, params in d["parameters"].items()
+        },
+        minimizer_result=_RestoredMinimizerResult(**d["statistics"]),
+        frequencies=np.asarray(d["frequencies"]),
+        impedances=_from_complex_array(d["impedances"]),
+        residuals=_from_complex_array(d["residuals"]),
+        pseudo_chisqr=d["pseudo_chisqr"],
+        method=d["method"],
+        weight=d["weight"],
+    )
+
+
 # ---- UI state ----
 # Everything _refresh() reads to decide what a sweep's mask looks like, and
 # that the automatic filters alone can't reconstruct: the eraser's per-point
@@ -303,9 +397,13 @@ def save_session(
     validation_params: Dict[Tuple[str, str], dict] = None,
     drt_params: Dict[str, dict] = None,
     ui_state: dict = None,
+    ecm_results: Dict[Tuple[str, str], FitResult] = None,
+    ecm_params: Dict[Tuple[str, str], dict] = None,
 ) -> None:
     validation_params = validation_params or {}
     drt_params = drt_params or {}
+    ecm_results = ecm_results or {}
+    ecm_params = ecm_params or {}
     label_by_key = {ds.key: ds.label for ds in datasets}
 
     session = {
@@ -340,6 +438,19 @@ def save_session(
             }
             for key, peaks in drt_peaks.items()
         ],
+        # Keyed by (circuit, sweep) rather than sweep alone, so several
+        # candidate circuits fitted to one sweep all survive -- see
+        # gui.main_window._ecm_results.
+        "ecm_results": [
+            {
+                "cdc": cdc,
+                "dataset_key": key,
+                "dataset_label": label_by_key.get(key, key),
+                "result": fit_result_to_dict(result),
+                "params": ecm_params.get((cdc, key), {}),
+            }
+            for (cdc, key), result in ecm_results.items()
+        ],
         "ui_state": ui_state or {},
     }
     payload = json.dumps(session, separators=(",", ":"), allow_nan=False)
@@ -357,13 +468,15 @@ def load_session(
     Dict[Tuple[str, str], dict],
     Dict[str, dict],
     dict,
+    Dict[Tuple[str, str], FitResult],
+    Dict[Tuple[str, str], dict],
 ]:
     raw = Path(path).read_bytes()
     text = gzip.decompress(raw).decode("utf-8") if raw[:2] == _GZIP_MAGIC else raw.decode("utf-8")
     session = json.loads(text)
 
     version = session.get("schema_version")
-    if version not in (1, 2, SCHEMA_VERSION):
+    if version not in (1, 2, 3, SCHEMA_VERSION):
         raise ValueError(
             f"Unsupported session schema version: {version!r} "
             f"(this build supports {SCHEMA_VERSION})"
@@ -408,6 +521,18 @@ def load_session(
         for p in session["drt_peaks"]
     }
 
+    # .get(), unlike the blocks above: ECM fits arrived in schema v4, so a
+    # v1-v3 session simply has none rather than a malformed entry.
+    ecm_entries = session.get("ecm_results", [])
+    ecm_results = {
+        (e["cdc"], _resolve_key(e)): fit_result_from_dict(e["result"])
+        for e in ecm_entries
+    }
+    ecm_params = {
+        (e["cdc"], _resolve_key(e)): e.get("params", {})
+        for e in ecm_entries
+    }
+
     ui_state = ui_state_from_dict(session.get("ui_state", {}), key_by_label)
 
     return (
@@ -418,4 +543,6 @@ def load_session(
         validation_params,
         drt_params,
         ui_state,
+        ecm_results,
+        ecm_params,
     )
