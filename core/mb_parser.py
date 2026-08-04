@@ -14,14 +14,8 @@ _EIS_TECHNIQUES = {"PEIS", "GEIS"}
 def parse_modulobat_file(
     file_path: str | Path, encoding: str = "latin-1", file_id: int = 0
 ) -> List[EISDataset]:
-    """
-    Parse a BioLogic/BT-Lab Modulo Bat .mpt export, extracting the PEIS/GEIS
-    sub-measurements embedded in the cycling sequence.
-
-    Each contiguous EIS sweep (identified by the file's 'z cycle' column,
-    which increments once per sweep regardless of which sequence step it
-    belongs to) becomes one EISDataset.
-    """
+    """Parse a BioLogic/BT-Lab Modulo Bat .mpt export, extracting the PEIS/GEIS
+    sub-measurements embedded in the cycling sequence."""
     path = Path(file_path)
 
     if not path.exists():
@@ -81,7 +75,8 @@ def parse_modulobat_file(
 
 
 def _find_eis_sequence_steps(header_lines: List[str]) -> set:
-    """Map each 'Ns' sequence-step index to its ctrl_type and return the PEIS/GEIS ones."""
+    """Map each 'Ns' sequence-step index to its ctrl_type and return the
+    PEIS/GEIS ones."""
     ns_values = None
     ctrl_types = None
     for line in header_lines:

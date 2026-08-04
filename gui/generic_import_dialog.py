@@ -1,11 +1,4 @@
-"""Confirmation dialog for the generic txt/csv importer.
-
-Shown when neither the Modulo Bat nor the standard BioLogic parser
-recognizes a file. Displays the sniffed headers and a few sample rows,
-pre-selects columns using the automatic header-based guess from
-core.generic_parser, and lets the user correct the mapping (including
-the Im/Phase sign) before the file is actually parsed.
-"""
+"""Confirmation dialog for the generic txt/csv importer."""
 from typing import Dict, Optional, Sequence
 
 from PySide6.QtWidgets import (
@@ -157,8 +150,7 @@ class GenericImportDialog(QDialog):
 
     def apply_to_all(self) -> bool:
         """Whether the accepted mapping should be reused for the rest of the
-        current load batch without asking again (see gui.main_window's
-        generic-import cache)."""
+        current load batch without asking again."""
         return self._apply_all_check.isChecked()
 
     def column_roles(self) -> Dict[str, int]:

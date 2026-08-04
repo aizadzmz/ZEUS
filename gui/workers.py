@@ -8,30 +8,24 @@ from typing import Callable, List
 
 from PySide6.QtCore import QThread, Signal
 
-# Cap on validation subprocesses, kept deliberately small. Each one is a
-# fresh interpreter that imports pyimpspec/numpy/scipy -- ~6 s and a few
-# hundred MB before it computes anything -- and an earlier 8-worker pool
-# exhausted this machine's paging file ("DLL load failed ... _core" ->
-# BrokenProcessPool). Past this point extra workers mostly buy memory
-# pressure, since the batch is import-bound rather than CPU-bound.
+# Cap on validation subprocesses, kept small on purpose. Each is a fresh
+# interpreter importing pyimpspec/numpy/scipy -- ~6 s and a few hundred MB
+# before computing anything -- and an 8-worker pool exhausted the paging file
+# ("DLL load failed ... _core" -> BrokenProcessPool). The batch is
+# import-bound, not CPU-bound, so more workers mostly buy memory pressure.
 MAX_VALIDATION_WORKERS = 4
 
-# Only spread a batch across processes when the work remaining after the
-# first sweep should take at least this long. Every worker pays that ~6 s
-# import up front, so short batches lose outright -- as does Z-HIT at any
-# realistic size (~0.16 s/sweep; a pooled 8-sweep Z-HIT batch measured
-# 8.2 s against 2.4 s serial). The margin over pure break-even (~8 s) is
-# deliberate: pooling also costs memory and pickling, so it should only be
-# used where it wins clearly.
+# Only spread a batch across processes when the work left after the first sweep
+# should take at least this long. Every worker pays that ~6 s import up front,
+# so short batches lose outright, as does Z-HIT at any realistic size
+# (~0.16 s/sweep). The margin over break-even (~8 s) is deliberate: pooling also
+# costs memory and pickling, so it should only be used where it wins clearly.
 PARALLEL_MIN_ESTIMATED_SECONDS = 20.0
 
 
 def _is_picklable(obj) -> bool:
-    """Whether obj can cross a process boundary. Worth checking up front:
-    an unpicklable runner (a lambda, or a closure like the one
-    MainWindow._run_drt_bayesian builds) fails per-submitted-task, which
-    would otherwise surface as one bogus error per dataset instead of a
-    quiet fall back to running in this thread."""
+    """Whether obj can cross a process boundary. Checked up front so an
+    unpicklable runner falls back to this thread quietly."""
     try:
         pickle.dumps(obj)
     except Exception:
@@ -40,32 +34,7 @@ def _is_picklable(obj) -> bool:
 
 
 class ValidationWorker(QThread):
-    """Runs a validation method (KK or Z-HIT) over several datasets.
-
-    Emits one result_ready per dataset so partial results land as they
-    finish, plus error for any dataset that fails, and progress after each.
-    QThread.finished fires when the whole batch is done.
-
-    The first sweep always runs here, in this thread, and is timed. That
-    measurement decides whether the rest is worth spreading across
-    processes: it calibrates for the method, the sweep's point count and
-    the machine at once, where a hardcoded per-method cost would not. That
-    self-calibration is why core._pyimpspec_patches cutting Kramers-Kronig
-    from ~3.4 s to ~0.75 s per 60-point sweep needed no change here; it
-    just moves the crossover from a handful of sweeps to a few dozen, and
-    the per-worker import cost the threshold is sized against is the same
-    either way. Z-HIT (~0.05 s/sweep) essentially never crosses it, which
-    is the intended outcome.
-
-    When the pool is used, results arrive in completion order rather than
-    selection order. Callers key them by dataset key, so this only shows
-    up in the order signals fire.
-
-    runner must be resolvable by name -- a module-level function, or a
-    partial over one -- to be eligible for the pool, since spawned workers
-    receive it pickled by reference. Anything else still works; it just
-    stays serial.
-    """
+    """Runs a validation method (KK or Z-HIT) over several datasets."""
 
     result_ready = Signal(str, str, object)  # method name, dataset key, result
     error = Signal(str, str)                 # dataset key, message
@@ -96,9 +65,8 @@ class ValidationWorker(QThread):
 
         unfinished = self._run_pooled(rest)
         if unfinished:
-            # The pool failed as a whole rather than per-dataset (a worker
-            # died, memory ran out). Finish what it never reported here, so
-            # a pool problem costs speed rather than the run.
+            # The pool failed as a whole (a worker died, memory ran out).
+            # Finish the rest here, so a pool problem costs speed, not the run.
             self._run_serial(unfinished)
 
     def _worth_pooling(self, seconds_per_sweep: float, rest: List) -> bool:
@@ -107,10 +75,8 @@ class ValidationWorker(QThread):
         return _is_picklable(self._runner) and _is_picklable(rest[0])
 
     def _run_pooled(self, datasets: List) -> List:
-        """Returns the datasets the pool never reported on -- empty if it
-        saw them all through. A dataset whose own run raised counts as
-        reported: it failed on its merits, and recomputing it in this thread
-        would only fail again, more slowly."""
+        """The datasets the pool never reported on; empty if it saw them all
+        through. A dataset whose own run raised counts as reported."""
         outstanding = {ds.key: ds for ds in datasets}
         workers = max(1, min(MAX_VALIDATION_WORKERS, os.cpu_count() or 1, len(datasets)))
         try:
@@ -134,8 +100,8 @@ class ValidationWorker(QThread):
             self._run_one(ds)
 
     def _run_one(self, ds) -> float:
-        """Computes one dataset here and reports it. Returns how long it
-        took, which run() uses to size up the rest of the batch."""
+        """Compute and report one dataset. Returns how long it took, which
+        run() uses to size up the rest of the batch."""
         started = time.perf_counter()
         try:
             result = self._runner(ds)
@@ -159,13 +125,8 @@ class ValidationWorker(QThread):
 
 
 class DRTWorker(QThread):
-    """Runs a (potentially very slow) DRT calculation over several datasets
-    off the UI thread — namely the Bayesian TR-RBF credible-interval run,
-    whose HMC sampler can take tens of minutes per sweep.
-
-    Emits one result_ready per dataset, plus error for any dataset that
-    fails or times out. QThread.finished fires when the whole batch is done.
-    """
+    """Runs a potentially very slow DRT calculation over several datasets off
+    the UI thread, emitting one result_ready per dataset."""
 
     result_ready = Signal(str, object)  # dataset key, result
     error = Signal(str, str)            # dataset key, message
@@ -186,18 +147,7 @@ class DRTWorker(QThread):
 
 
 class ECMWorker(QThread):
-    """Fits an equivalent circuit to several datasets off the UI thread.
-
-    A single CNLS fit is fast (~0.02 s for R(RC)(RC) on 40 points), but a
-    batch of them is not, and the sidebar stays disabled for the duration --
-    so this reports progress per sweep rather than only on completion, which
-    is the one thing it adds over DRTWorker.
-
-    Deliberately serial, and not poolable like ValidationWorker: with
-    "seed from previous" enabled each fit's starting guess is the previous
-    fit's result, so the sweeps are a chain rather than independent work.
-    Running them in order also keeps the seeding deterministic.
-    """
+    """Fits an equivalent circuit to several datasets off the UI thread."""
 
     result_ready = Signal(str, object)  # dataset key, FitResult
     error = Signal(str, str)            # dataset key, message

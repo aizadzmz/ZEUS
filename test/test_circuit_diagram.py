@@ -31,37 +31,34 @@ def labels(svg: bytes):
 
 
 # --- Value formatting ---
-# Engineering prefixes, because nobody quotes a double-layer capacitance in
-# scientific notation.
+# Engineering prefixes, not scientific notation.
 assert format_quantity(10.0, "ohm") == "10 Ω"
 assert format_quantity(1234.0, "ohm") == "1.234 kΩ"
 assert format_quantity(1.2e-6, "F") == "1.2 µF"
 assert format_quantity(9.9e-10, "F") == "990 pF"
 assert format_quantity(0.0, "ohm") == "0 Ω"
-# Dimensionless quantities (the CPE exponent) keep their plain spelling: a
-# prefix with no unit after it would read as a typo.
+# Dimensionless quantities (the CPE exponent) keep their plain spelling.
 assert format_quantity(0.9012, "") == "0.9012"
 assert format_quantity(float("nan"), "ohm") == "—"
-# Past the last prefix the mantissa is allowed to leave 1-999 rather than the
-# unit losing its meaning.
+# Past the last prefix the mantissa may leave 1-999 rather than the unit
+# losing its meaning.
 assert format_quantity(1e-18, "F").endswith(" fF"), format_quantity(1e-18, "F")
 print("format_quantity OK")
 
 
 # --- Every shipped preset draws ---
-# The presets populate a dropdown, and the tab previews whichever is picked,
-# so an element the drawing code cannot place is a crash on selection.
+# The tab previews whichever preset is picked, so an element the drawing code
+# cannot place is a crash on selection.
 for name, cdc in CIRCUIT_PRESETS:
     svg = build_preview_diagram(cdc)
     assert svg.startswith(b"<svg"), name
-    # Every element is named, whether or not it has a symbol of its own --
-    # unmapped ones (Warburg, Gerischer) fall back to a box, and the name is
-    # then the only thing saying what the box is.
+    # Every element is named. Unmapped ones (Warburg, Gerischer) fall back to
+    # a box, where the name is the only thing identifying it.
     assert len(labels(svg)) >= cdc.count("R"), name
 print(f"all {len(CIRCUIT_PRESETS)} presets draw OK")
 
-# A half-typed code is the caller's problem to catch (the GUI's live
-# validation does), not something to be silently drawn as an empty circuit.
+# A half-typed code must raise, not draw silently as an empty circuit; the
+# GUI's live validation catches it.
 try:
     build_preview_diagram("R(RC")
 except Exception:

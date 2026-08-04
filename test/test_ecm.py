@@ -17,9 +17,8 @@ from core.io_utils import EISDataset
 from core.session import SCHEMA_VERSION, load_session, save_session
 
 # --- Synthetic spectrum: R0 + two parallel RC elements (tau = 5 ms, 300 ms) ---
-# Same construction as test_drt.py/test_session.py, but here the ground truth
-# is the point: R(RC)(RC) is the *true* model of this spectrum, so a fit of it
-# must recover R0=10, R1=50, R2=30 and must beat any simpler circuit.
+# R(RC)(RC) is the *true* model here, so a fit of it must recover R0=10,
+# R1=50, R2=30 and must beat any simpler circuit.
 R0_TRUE, R1_TRUE, R2_TRUE = 10.0, 50.0, 30.0
 rng = np.random.default_rng(42)
 f = np.logspace(5, -1, 40)
@@ -33,9 +32,8 @@ TRUE_CDC = "R(RC)(RC)"
 
 
 def resistances(result):
-    """The fitted resistor values, sorted. Sorted because pyimpspec does not
-    guarantee which parallel branch of the circuit lands on which RC pair --
-    the fit is of a set of time constants, not an ordered list."""
+    """The fitted resistor values, sorted -- pyimpspec does not guarantee which
+    parallel branch lands on which RC pair."""
     return sorted(
         p.value
         for name, params in result.parameters.items()
@@ -54,14 +52,14 @@ for bad in ("R(RC", "R(XY)", "", "   "):
     assert not ok, f"{bad!r} should not validate (got {message!r})"
 print("CDC validation OK (accepts valid, rejects malformed/unknown/empty)")
 
-# Harmless typing differences must collapse to one cache key, or fitting the
-# "same" circuit twice would silently produce two entries.
+# Typing differences must collapse to one cache key, or the "same" circuit
+# fitted twice produces two entries.
 assert canonical_cdc("R(RC)") == canonical_cdc("R( RC )") == canonical_cdc("[R(RC)]")
 assert canonical_cdc("R(RC)") != canonical_cdc("R(RC)(RC)")
 print("CDC canonicalization OK, R(RC) ->", canonical_cdc("R(RC)"))
 
-# Every shipped preset must parse -- they populate a dropdown, so a typo in
-# one is a dead menu entry rather than something the user can work around.
+# Every shipped preset must parse: they populate a dropdown, so a typo is a
+# dead menu entry.
 for name, cdc in CIRCUIT_PRESETS:
     ok, message = validate_cdc(cdc)
     assert ok, f"preset {name!r} ({cdc}) does not parse: {message}"
@@ -95,8 +93,8 @@ dataset_b = EISDataset(
 seeded_cdc = seed_cdc(TRUE_CDC, result)
 assert seeded_cdc != TRUE_CDC, "seeding should rewrite the CDC with fitted values"
 assert canonical_cdc(seeded_cdc) == canonical_cdc(TRUE_CDC), "topology must not change"
-# A previous fit of a different circuit is not seedable and must be ignored
-# rather than mismatched element-by-element.
+# A previous fit of a different circuit is not seedable and must be ignored,
+# not mismatched element-by-element.
 assert seed_cdc("R(RC)", result) == "R(RC)"
 assert seed_cdc(TRUE_CDC, None) == TRUE_CDC
 print("seed_cdc OK (rewrites values, preserves topology, falls back on mismatch)")
@@ -111,8 +109,8 @@ print(
 )
 
 # --- Two circuits fitted to one sweep both survive ---
-# The regression test for keying the cache by (circuit, sweep) rather than
-# sweep alone: fitting a second circuit must not evict the first.
+# The cache is keyed by (circuit, sweep), so a second circuit must not evict
+# the first.
 simple = run_ecm_fit(dataset, "R(RC)")
 ecm_results = {
     (canonical_cdc("R(RC)"), dataset.key): simple,
@@ -136,8 +134,8 @@ assert "Akaike info. criterion" in report  # statistics dataframe
 print("format_fit_report OK")
 
 # --- Building a circuit from DRT peaks ---
-# The DRT supplies what an ECM cannot infer on its own: how many processes
-# there are. On this spectrum the answer is known to be two.
+# The DRT supplies what an ECM cannot infer: how many processes there are.
+# On this spectrum the answer is two.
 peaks = analyze_drt_peaks(run_drt(dataset))
 r_series = series_resistance(dataset)
 assert np.isclose(r_series, R0_TRUE, rtol=0.02), r_series

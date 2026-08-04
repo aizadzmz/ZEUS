@@ -1,17 +1,13 @@
 # Save/load an analysis session (datasets + validation + DRT results) as
 # gzipped JSON (.eisz).
 #
-# pyimpspec's analysis result classes (KramersKronigResult, ZHITResult,
-# TRRBFResult, BHTResult, DRTPeaks) have no to_dict()/from_dict() of their
-# own, so this module owns that conversion instead of pickling the objects.
-# Pickling would tie a saved session to the exact pyimpspec class layout it
-# was created with; this schema is versioned and survives library upgrades
-# as long as SCHEMA_VERSION is bumped (with a migration) when the format
-# changes.
+# pyimpspec's result classes (KramersKronigResult, ZHITResult, TRRBFResult,
+# BHTResult, DRTPeaks) have no to_dict()/from_dict(), so this module owns that
+# conversion rather than pickling, which would tie a session to one pyimpspec
+# class layout. Bump SCHEMA_VERSION (with a migration) on any format change.
 #
-# The file itself is gzipped JSON rather than plain JSON: numeric arrays
-# compress ~4-5x, and gzip's magic bytes (1f 8b) let load_session tell a
-# compressed file from a plain one, so old plain-JSON sessions still open.
+# Gzipped rather than plain JSON: numeric arrays compress ~4-5x, and the gzip
+# magic bytes (1f 8b) let load_session still open old plain-JSON sessions.
 import gzip
 import json
 from pathlib import Path
@@ -65,8 +61,7 @@ def dataset_from_dict(d: dict) -> EISDataset:
         DataSet.from_dict(data_dict),
         index=d["index"],
         source_file=d["source_file"],
-        # Absent in schema v1/v2 sessions, which predate multi-file support
-        # -- every dataset they ever saved had the implicit file_id=0.
+        # Absent in schema v1/v2, which predate multi-file support.
         file_id=d.get("file_id", 0),
     )
 
@@ -227,22 +222,16 @@ def drt_peaks_from_dict(d: dict) -> DRTPeaks:
 
 
 # ---- ECM (equivalent circuit fits) ----
-# FitResult is the one result type here that holds a live third-party object:
-# an lmfit MinimizerResult, which is not JSON-serializable. Everything the app
-# actually reads off it is a handful of scalars (FitResult.to_statistics_
-# dataframe uses exactly the seven below), so those are stored and handed back
-# via the stand-in class -- which keeps to_statistics_dataframe() working on a
-# reloaded session instead of raising on a None. What does not survive is the
-# rest of lmfit's machinery: the covariance matrix, the parameter correlations,
-# and the ability to resume or refine the fit. Reloading gives you the fitted
-# curve, its parameters with their error bars, and its statistics; refitting is
-# what you do if you need more than that.
+# FitResult holds an lmfit MinimizerResult, which is not JSON-serializable.
+# Only the seven scalars to_statistics_dataframe() reads are stored, handed
+# back via the stand-in class below so that method keeps working on a reloaded
+# session. The covariance matrix, parameter correlations, and the ability to
+# resume or refine the fit do not survive -- refit if you need them.
 
 
 class _RestoredMinimizerResult:
-    """The scalars FitResult reads off lmfit's MinimizerResult, restored from
-    a saved session. Not an lmfit object and not a substitute for one -- see
-    the note above."""
+    """The scalars FitResult reads off lmfit's MinimizerResult, restored from a
+    saved session. Not an lmfit object or a substitute for one."""
 
     def __init__(self, chisqr, redchi, aic, bic, nfree, ndata, nfev):
         self.chisqr = chisqr
@@ -257,17 +246,16 @@ class _RestoredMinimizerResult:
 def fit_result_to_dict(result: FitResult) -> dict:
     m = result.minimizer_result
     return {
-        # serialize() (not to_string()) so the fitted values travel with the
-        # topology -- that is what makes the reloaded circuit reproduce the
-        # curve rather than just its shape.
+        # serialize(), not to_string(), so the fitted values travel with the
+        # topology and the reloaded circuit reproduces the curve.
         "circuit_cdc": result.circuit.serialize(),
         "parameters": {
             element: {
                 symbol: {
                     "value": float(p.value),
-                    # stderr is NaN whenever the fitting method produced no
-                    # covariance matrix (see core.ecm.run_ecm_fit). JSON has no
-                    # NaN under allow_nan=False, so it travels as None.
+                    # stderr is NaN when the fit produced no covariance matrix
+                    # (see core.ecm.run_ecm_fit); allow_nan=False has no NaN,
+                    # so it travels as None.
                     "stderr": None if p.stderr != p.stderr else float(p.stderr),
                     "fixed": bool(p.fixed),
                     "unit": p.unit,
@@ -320,19 +308,16 @@ def fit_result_from_dict(d: dict) -> FitResult:
 
 
 # ---- UI state ----
-# Everything _refresh() reads to decide what a sweep's mask looks like, and
-# that the automatic filters alone can't reconstruct: the eraser's per-point
-# overrides (main_window._manual_masked/_manual_kept -- see the comment at
-# their definition for why those live outside DataSet.mask) plus the filter
-# widget values. Without this, reloading a session and touching any sidebar
-# control would silently re-derive a different mask than the one saved.
+# What _refresh() needs to rebuild a sweep's mask and the automatic filters
+# cannot reconstruct: the eraser's per-point overrides
+# (main_window._manual_masked/_manual_kept) plus the filter widget values.
+# Without these, touching any sidebar control after a reload would derive a
+# different mask than the one saved.
 #
-# manual_masked/manual_kept are keyed by ds.key (not ds.label) as of schema
-# v3, so overrides land on the right sweep when a session has more than one
-# source file -- see ui_state_from_dict's v1/v2 fallback below. There is no
-# "source_name" field as of v3: with several files loaded there's no single
-# name to store, and it's not needed anyway -- gui.main_window rebuilds its
-# file list straight from the loaded datasets' file_id/source_file.
+# Keyed by ds.key since schema v3, so overrides land on the right sweep in a
+# multi-file session (see ui_state_from_dict's v1/v2 fallback). No
+# "source_name" field: main_window rebuilds its file list from the datasets'
+# file_id/source_file.
 
 def ui_state_to_dict(
     manual_masked: Dict[str, set],
@@ -351,11 +336,8 @@ def ui_state_to_dict(
 
 
 def ui_state_from_dict(d: dict, key_by_label: Optional[Dict[str, str]] = None) -> dict:
-    """key_by_label resolves a v1/v2 session's label-keyed manual_masked/
-    manual_kept back to ds.key -- see load_session's own _resolve_key for why
-    that mapping is safe (every pre-v3 session had exactly one file). Omit it
-    (or leave a label unresolved) and the raw label passes through instead,
-    which is only reachable from a hand-edited or corrupt session file."""
+    """Rebuild ui_state from a saved session; key_by_label remaps a v1/v2
+    session's label-keyed overrides to ds.key."""
     key_by_label = key_by_label or {}
 
     def _remap(overrides: dict) -> Dict[str, set]:
@@ -374,19 +356,16 @@ def ui_state_from_dict(d: dict, key_by_label: Optional[Dict[str, str]] = None) -
 
 
 # ---- whole session ----
-# Result dicts are keyed the same way main_window.py keys its in-memory
-# caches: validation_results by (method, ds.key), drt_results and drt_peaks
-# by ds.key. ds.key (file_id:index) is unique across every loaded file,
-# unlike ds.label ("Set 01") which only a single-file session could get away
-# with -- see core.io_utils.EISDataset. Each entry also carries dataset_label
-# alongside dataset_key purely for a human reading the raw JSON; only the key
-# is used to reconstruct the in-memory dicts.
+# Result dicts are keyed as main_window.py keys its in-memory caches:
+# validation_results by (method, ds.key); drt_results and drt_peaks by ds.key.
+# ds.key (file_id:index) is unique across files, unlike ds.label ("Set 01").
+# dataset_label is stored alongside dataset_key only for humans reading the
+# raw JSON; reconstruction uses the key alone.
 #
-# validation_params/drt_params carry the effective keyword arguments behind
-# each result (e.g. rbf_type, shape_coeff, lambda_value, admittance) --
-# without them a reloaded curve can be viewed but not explained or
-# reproduced. They're free-form dicts of JSON scalars, keyed the same way as
-# their corresponding result.
+# validation_params/drt_params hold the effective keyword arguments behind each
+# result (rbf_type, shape_coeff, lambda_value, admittance, ...), without which
+# a reloaded curve cannot be explained or reproduced. Free-form dicts of JSON
+# scalars, keyed like their result.
 
 def save_session(
     path,
@@ -438,9 +417,8 @@ def save_session(
             }
             for key, peaks in drt_peaks.items()
         ],
-        # Keyed by (circuit, sweep) rather than sweep alone, so several
-        # candidate circuits fitted to one sweep all survive -- see
-        # gui.main_window._ecm_results.
+        # Keyed by (circuit, sweep) so several candidate circuits fitted to one
+        # sweep all survive (see gui.main_window._ecm_results).
         "ecm_results": [
             {
                 "cdc": cdc,
@@ -484,12 +462,9 @@ def load_session(
 
     datasets = [dataset_from_dict(d) for d in session["datasets"]]
 
-    # v1/v2 sessions predate multi-file support and keyed every result by
-    # "dataset_label" alone (e.g. "Set 01"), which was safe back then because
-    # a session could only ever hold one file's worth of sweeps. Resolve
-    # those old labels back to the now-canonical ds.key via the datasets just
-    # loaded -- unambiguous for the same reason. v3+ sessions carry
-    # "dataset_key" directly and skip this entirely.
+    # v1/v2 sessions keyed results by "dataset_label" alone, unambiguous
+    # because they held one file's sweeps. Map those back to ds.key; v3+
+    # sessions carry "dataset_key" and skip this.
     key_by_label = {ds.label: ds.key for ds in datasets}
 
     def _resolve_key(entry: dict) -> str:
@@ -521,8 +496,7 @@ def load_session(
         for p in session["drt_peaks"]
     }
 
-    # .get(), unlike the blocks above: ECM fits arrived in schema v4, so a
-    # v1-v3 session simply has none rather than a malformed entry.
+    # .get(): ECM fits arrived in schema v4, so a v1-v3 session has none.
     ecm_entries = session.get("ecm_results", [])
     ecm_results = {
         (e["cdc"], _resolve_key(e)): fit_result_from_dict(e["result"])

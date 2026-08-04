@@ -1,15 +1,4 @@
-"""Public surface of the analysis core.
-
-Every name here is resolved on first attribute access rather than at import
-time (PEP 562). Importing any submodule -- `core.plotting`, say -- runs this
-file first, so eager re-exports made every one of them pay for pyimpspec, and
-through it scipy.signal and sympy: ~4 s that the GUI spent before its window
-appeared. See gui/app.py, which now shows the window off the light stack and
-warms the heavy modules in the background.
-
-`from core import parse_eis_file` still works exactly as before; it just
-imports core.io_utils at that moment instead of at startup.
-"""
+"""Public surface of the analysis core."""
 
 from typing import TYPE_CHECKING
 

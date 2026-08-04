@@ -42,11 +42,8 @@ def run_drt(
     timeout: int = 60,
     num_procs: int = -1,
 ) -> TRRBFResult:
-    """
-    Compute the DRT of the dataset's currently unmasked points using
-    Tikhonov regularization with radial basis function (or piecewise
-    linear) discretization (TR-RBF).
-
+    """Compute the DRT of the dataset's unmasked points using Tikhonov
+    regularization with RBF or piecewise-linear discretization (TR-RBF).
     Settings map onto pyDRTtools' GUI panel as follows:
       rbf_type           -> Method of Discretization
       mode                -> Data Used ("complex" = Combined Re-Im Data)
@@ -71,8 +68,7 @@ def run_drt(
         only meaningful when credible_intervals=True
       - lambda_value: the regularization parameter actually used (the
         "Optimal Regularization parameter" once cross-validated)
-    Pass the result to analyze_drt_peaks() for peak positions.
-    """
+    Pass the result to analyze_drt_peaks() for peak positions."""
     from pyimpspec.analysis.drt import calculate_drt_tr_rbf
 
     return calculate_drt_tr_rbf(
@@ -103,16 +99,8 @@ def run_drt_bht(
     maximum_symmetry: float = 0.5,
     num_procs: int = -1,
 ) -> BHTResult:
-    """
-    Compute the DRT via the Bayesian Hilbert Transform (BHT) method, which
-    also scores how well the dataset's real and imaginary parts agree with
-    each other (a Kramers-Kronig-style consistency check). Corresponds to
-    pyDRTtools' "Hilbert Transform" run.
-
-    Unlike TRRBFResult, BHTResult.get_drt_data() returns three arrays
-    (tau, gamma_re, gamma_im) since the DRT is estimated separately from
-    each part of the impedance.
-    """
+    """Compute the DRT via the Bayesian Hilbert Transform, which also scores
+    real/imaginary consistency. Returns (tau, gamma_re, gamma_im)."""
     from pyimpspec.analysis.drt import calculate_drt_bht
 
     return calculate_drt_bht(
@@ -133,9 +121,6 @@ def analyze_drt_peaks(
     num_peaks: int = 0,
     disallow_skew: bool = False,
 ) -> DRTPeaks:
-    """
-    Fit individual peaks in a DRT result using skew-normal distributions.
-    Corresponds to pyDRTtools' "Peak Analysis" / "Number of peaks".
-    num_peaks=0 analyzes every detected peak.
-    """
+    """Fit individual peaks in a DRT result using skew-normal distributions.
+    num_peaks=0 analyzes every detected peak."""
     return result.analyze_peaks(num_peaks=num_peaks, disallow_skew=disallow_skew)

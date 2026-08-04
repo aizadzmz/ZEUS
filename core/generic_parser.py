@@ -1,13 +1,4 @@
-"""Parse generic, loosely-structured EIS exports (plain .txt or .csv).
-
-Unlike the BioLogic-specific parsers in io_utils/mb_parser, these files have
-no fixed schema: headers vary ("freq/Hz" vs "Frequency (Hz)"), the impedance
-may be given as Re/Im or as magnitude/phase, and sign conventions differ
-(e.g. a column literally named "-Z''" stores the negative of Im(Z)). Column
-roles are guessed from the header text but callers can override the guess
-with an explicit ``column_roles`` mapping (e.g. from a GUI confirmation
-dialog) when the guess is wrong or ambiguous.
-"""
+"""Parse generic, loosely-structured EIS exports (plain .txt or .csv)."""
 from __future__ import annotations
 
 import csv
@@ -47,11 +38,7 @@ def _normalize_header(raw: str) -> Tuple[str, bool]:
 
 
 def classify_header(raw: str) -> Tuple[Optional[str], bool]:
-    """Guess which physical quantity a column header represents.
-
-    Returns (role, is_negated). role is one of "frequency", "re", "im",
-    "mag", "phase", "time", "index", or None if unrecognized.
-    """
+    """Guess which physical quantity a column header represents."""
     body, neg = _normalize_header(raw)
     for role, aliases in _ROLE_ALIASES.items():
         if body in aliases:
@@ -60,12 +47,7 @@ def classify_header(raw: str) -> Tuple[Optional[str], bool]:
 
 
 def guess_column_roles(headers: Sequence[str]) -> Dict[str, int]:
-    """Best-effort header -> role mapping. Values are column indices.
-
-    Negated "im"/"phase" columns (e.g. "-Z''", "-Phase") are keyed as
-    "neg_im"/"neg_phase" so callers know to flip sign when computing Z.
-    The first match wins per role/sign combination.
-    """
+    """Best-effort header -> role mapping. Values are column indices."""
     mapping: Dict[str, int] = {}
     for i, header in enumerate(headers):
         role, neg = classify_header(header)
@@ -92,31 +74,20 @@ def _read_rows(path: Path, encoding: str) -> Tuple[List[str], List[List[str]]]:
 
 
 def _split_rows(lines: List[str]) -> Tuple[List[str], List[List[str]]]:
-    """Hand-split every line/cell in pure Python.
-
-    This used to hand off delimited files to pandas' C parser. Measured on
-    the exports this actually sees, that was the wrong trade: ~3x *slower*
-    than this on a few-hundred-row sweep file, and the ~0.6s it saved on an
-    86k-row one was less than the ~0.9s pandas costs to import -- an import
-    that, being deferred to first use, landed inside the click that opens
-    the file. Splitting here keeps the parse dependency-free and the cost
-    proportional to the file.
-    """
+    """Hand-split every line/cell in pure Python."""
     delimiter = next((c for c in _DELIMITER_CANDIDATES if c in lines[0]), None)
     if delimiter:
-        # csv.reader (not str.split) so quoted fields - e.g. Excel's "CSV
-        # UTF-8" export wrapping every field in "..." - are unquoted
-        # correctly instead of leaving literal quote characters behind.
+        # csv.reader, not str.split, so quoted fields (Excel's "CSV UTF-8"
+        # export wraps every field in "...") are unquoted correctly.
         rows = list(csv.reader(lines, delimiter=delimiter))
     else:
-        # str.split() with no args splits on any run of whitespace and is
-        # implemented in C, unlike re.split(r"\s+", ...) - matters here
-        # since this runs once per line.
+        # Bare str.split() splits on any run of whitespace and runs in C,
+        # unlike re.split(r"\s+", ...); this runs once per line.
         rows = [ln.split() for ln in lines]
 
-    # A trailing delimiter on a line yields a phantom empty field (BioLogic
-    # exports end every row with a tab). Trim those so the header width
-    # matches the real data width instead of silently dropping every row.
+    # A trailing delimiter yields a phantom empty field (BioLogic exports end
+    # every row with a tab). Trim so the header width matches the data width,
+    # instead of silently dropping every row.
     headers = _rstrip_blanks([h.strip() for h in rows[0]])
     ncols = len(headers)
     data_rows = [
@@ -138,8 +109,8 @@ def _rstrip_blanks(cells: List[str]) -> List[str]:
 def sniff_columns(
     file_path: str | Path, encoding: str = "utf-8-sig"
 ) -> Tuple[List[str], List[List[str]], Dict[str, int]]:
-    """Read headers + a few sample rows and guess column roles, without
-    parsing the whole file. Intended for a GUI confirmation dialog."""
+    """Read headers + a few sample rows and guess column roles, without parsing
+    the whole file. Intended for a GUI confirmation dialog."""
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
@@ -153,13 +124,7 @@ def sniff_columns(
 
 
 def _column_to_floats(rows: List[List[str]], col: int) -> np.ndarray:
-    """Convert one column of a hand-split data grid to a float array.
-
-    Tries a single bulk conversion first (fast path: the common case of a
-    clean numeric export). Only falls back to converting cell-by-cell -
-    turning unparseable cells into NaN rather than raising - if the bulk
-    conversion hits a bad cell somewhere in the column.
-    """
+    """Convert one column of a hand-split data grid to a float array."""
     cells = [row[col] for row in rows]
     try:
         return np.array(cells, dtype=np.float64)
@@ -179,15 +144,8 @@ def parse_generic_file(
     encoding: str = "utf-8-sig",
     file_id: int = 0,
 ) -> List[EISDataset]:
-    """Parse a generic single- or multi-sweep EIS export (plain .txt or
-    .csv) with arbitrary column headers.
-
-    column_roles maps role names to column indices: "frequency" (required),
-    plus either ("re" and "im"/"neg_im") or ("mag" and "phase"/"neg_phase").
-    If omitted, roles are guessed from the header row; pass an explicit
-    mapping (e.g. from sniff_columns + user confirmation) to override a bad
-    guess.
-    """
+    """Parse a generic single- or multi-sweep EIS export (plain .txt or .csv)
+    with arbitrary column headers."""
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {path}")
@@ -270,13 +228,7 @@ def parse_generic_file(
 def _drop_duplicate_frequencies(
     frequencies: np.ndarray, impedances: np.ndarray
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Keep only the first row per frequency, preserving sweep order.
-
-    pyimpspec's DataSet rejects a repeated frequency outright, but real
-    exports do repeat one (a point measured twice for averaging, duplicated
-    rows). Dropping the repeat costs one point; letting it through raises
-    ValueError out of the parser and used to take the whole app down.
-    """
+    """Keep only the first row per frequency, preserving sweep order."""
     _, first_occurrence = np.unique(frequencies, return_index=True)
     keep = np.sort(first_occurrence)
     return frequencies[keep], impedances[keep]
@@ -285,9 +237,8 @@ def _drop_duplicate_frequencies(
 def _split_into_sweeps(
     frequencies: np.ndarray, impedances: np.ndarray
 ) -> List[Tuple[np.ndarray, np.ndarray]]:
-    """Split rows into separate sweeps whenever the frequency direction
-    reverses. A single EIS sweep moves monotonically high->low or
-    low->high, so a reversal marks the start of the next sweep."""
+    """Split rows into separate sweeps wherever the frequency direction
+    reverses, since one sweep is monotonic."""
     if len(frequencies) < 2:
         return [(frequencies, impedances)]
 

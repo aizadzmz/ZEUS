@@ -1,16 +1,6 @@
-"""Export tests for core.bdf_export.
-
-Self-contained: builds a synthetic spectrum rather than reading a fixture, so
-this runs anywhere (unlike test_parser.py / test_mb.py, which point at paths
-under the author's Downloads folder).
-
-The batterydf conformance test at the bottom is skipped unless the dev extras
-are installed. It must stay headless -- batterydf pulls in pandas and pyarrow,
-and the whole point of the stdlib writer is that the Qt process never sees them.
-"""
+"""Export tests for core.bdf_export."""
 import csv
 import json
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -70,9 +60,8 @@ def test_values_round_trip(tmp_path, dataset):
 
 
 def test_export_honors_the_mask(tmp_path, dataset):
-    """The default must write the points still on screen, not the erased ones.
-    pyimpspec's `masked` flag is inverted relative to how it reads, so this
-    guards against passing it through the wrong way round."""
+    """The default must write the points still on screen, not the erased ones;
+    pyimpspec's `masked` flag is inverted relative to how it reads."""
     mask = dataset.data.get_mask()
     for i in range(5):
         mask[i] = True
@@ -102,7 +91,7 @@ def test_sidecar_omits_unknown_metadata(tmp_path, dataset):
     doc = json.loads((tmp_path / "synthetic_set01.jsonld").read_text(encoding="utf-8"))
 
     assert doc["@type"] == "Dataset"
-    # Absent, not blank -- a blank field invites a reader to trust it.
+    # Absent, not blank: a blank field invites a reader to trust it.
     for absent in ("chemistry", "ambientTemperature", "instrument"):
         assert absent not in doc
 
@@ -220,18 +209,7 @@ def test_nan_standard_error_becomes_an_empty_cell(tmp_path, dataset):
 # ---- conformance against the reference implementation ----
 
 def test_every_column_is_a_recognized_bdf_term(tmp_path, dataset):
-    """Read the export back with the reference batterydf package.
-
-    The claim under test is precise: every column we write is a term the real
-    spec recognizes ("extras" is empty), and the *only* thing it objects to is
-    the three time-series columns an EIS sweep genuinely does not have. If a
-    future BDF release renames one of our impedance labels, that column shows
-    up in "extras" and this fails.
-
-    Skipped unless the dev extras are installed. batterydf depends on pandas
-    and pyarrow, so it must never be imported from core/ or gui/ -- which is
-    why this test is headless and lives outside the Qt process.
-    """
+    """Read the export back with the reference batterydf package."""
     bdf = pytest.importorskip("bdf", reason="batterydf not installed (dev extra)")
 
     path = write_spectrum(tmp_path / "conformance.bdf.csv", dataset)
@@ -253,20 +231,7 @@ def test_every_column_is_a_recognized_bdf_term(tmp_path, dataset):
 
 
 def test_known_gap_between_batterydf_and_the_ontology(tmp_path, dataset):
-    """Characterization test, pinning a discrepancy in the upstream project.
-
-    The BDF *ontology* defines frequency_hertz, real/imaginary/absolute
-    impedance and phase_degree, all with obligation "optional" -- those IRIs
-    are what core.bdf_export writes into the sidecar's propertyID fields. The
-    released batterydf 0.1.0, however, validates against a hardcoded table of
-    27 columns (3 required + 24 optional) that predates them, so it reports
-    every impedance column as an unrecognized "extra".
-
-    So this asserts the gap rather than the absence of one. When batterydf
-    catches up to the ontology, "extras" empties out and this test fails --
-    which is the signal to delete it and tighten the assertion above to
-    extras == []. It is not a defect in the export.
-    """
+    """Characterization test, pinning a discrepancy in the upstream project."""
     bdf = pytest.importorskip("bdf", reason="batterydf not installed (dev extra)")
 
     path = write_spectrum(tmp_path / "gap.bdf.csv", dataset)

@@ -12,8 +12,8 @@ app = QApplication.instance() or QApplication([])
 
 
 def show(widget, title: str) -> None:
-    """Show a plot widget and block until it's closed, mirroring
-    matplotlib's plt.show() for these manual visual checks."""
+    """Show a plot widget and block until it's closed, mirroring matplotlib's
+    plt.show() for these manual visual checks."""
     widget.setWindowTitle(title)
     widget.resize(800, 600)
     widget.show()

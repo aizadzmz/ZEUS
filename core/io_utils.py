@@ -8,13 +8,10 @@ from pyimpspec import DataSet
 
 class EISParseError(Exception):
     """Raised when parsing an EIS .mpt file fails."""
-    pass
 
 
 class EISDataset:
-    """
-    Wraps a single pyimpspec DataSet (one frequency sweep / experiment).
-    """
+    """Wraps a single pyimpspec DataSet (one frequency sweep / experiment)."""
 
     def __init__(self, dataset: DataSet, index: int, source_file: str, file_id: int = 0):
         self._dataset = dataset
@@ -28,9 +25,8 @@ class EISDataset:
 
     @property
     def label(self) -> str:
-        """Short label for legends, e.g. 'Set 01'. Unique only within the
-        same file -- use `key` for anything that must stay unique across
-        several loaded files."""
+        """Short label for legends, e.g. 'Set 01'. Unique only within one file
+        -- use `key` across files."""
         return f"Set {self.index + 1:02d}"
 
     @property
@@ -40,17 +36,14 @@ class EISDataset:
 
     @property
     def key(self) -> str:
-        """Stable identity for dict keys/signals -- unique across every
-        loaded file, unlike `label`. Use this, never `label`, anywhere a
-        sweep from one file must not collide with a same-labeled sweep from
-        another."""
+        """Stable identity for dict keys and signals, unique across every
+        loaded file, unlike `label`."""
         return f"{self.file_id}:{self.index}"
 
     @property
     def qualified_label(self) -> str:
-        """Display label that disambiguates across files, e.g.
-        'my_file · Set 01'. Use in legends/titles once more than one file is
-        loaded; `label` alone is fine when there's only ever been one."""
+        """Display label that disambiguates across files, e.g. 'my_file — Set
+        01'."""
         return f"{self.source_file} · {self.label}"
 
     @property
@@ -97,9 +90,8 @@ _SUPPORTED_EXTENSIONS = (".mpt", ".txt")
 
 
 def parse_eis_file(file_path: str | Path, file_id: int = 0) -> List[EISDataset]:
-    """
-    Parse a BioLogic .mpt or plaintext .txt file into a list of EISDataset objects.
-    """
+    """Parse a BioLogic .mpt or plaintext .txt file into a list of EISDataset
+    objects."""
     path = Path(file_path)
 
     if not path.exists():

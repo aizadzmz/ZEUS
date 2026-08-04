@@ -5,16 +5,15 @@ import sys
 from pathlib import Path
 
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.ico"
-ACCENT = "#3b6fd4"  # matches gui.theme.ACCENT; duplicated so the splash can
-                    # render before gui.theme (and the pyqtgraph import it
-                    # drags in) is loaded.
+
+# gui.style is Qt-light (no pyqtgraph, no qdarktheme), so the splash can share
+# the real accent color without duplicating the literal.
+from gui.style import ACCENT  # noqa: E402
 
 # Shown one at a time on the splash screen while each module loads. Together
-# these cost several seconds -- more on a cold boot, before Windows has these
-# DLLs/pyd files cached -- and every one of them used to be paid silently
-# after the window was already shown, so the app *looked* fast but the first
-# click on Plot/Validate ate the real cost. Blocking on them here instead,
-# with visible progress, moves the wait to where the user expects it.
+# they cost several seconds, more on a cold boot. Blocking on them here, with
+# visible progress, puts the wait up front instead of on the first click of
+# Plot/Validate.
 _SPLASH_STEPS = (
     ("Loading numerical libraries...", "numpy"),
     ("Loading plotting libraries (PyQtGraph)...", "pyqtgraph"),
@@ -23,9 +22,8 @@ _SPLASH_STEPS = (
     ("Loading validation tools (pyimpspec)...", "core.validation"),
     ("Loading DRT tools...", "core.drt"),
     ("Loading circuit fitting tools...", "core.ecm"),
-    # ~0.5 s, and core.circuit_diagram defers it like every other heavy
-    # import, so without this the first visit to the ECM Parameters tab pays
-    # it mid-click.
+    # ~0.5 s, deferred by core.circuit_diagram, so without this the first
+    # visit to the ECM Parameters tab pays it mid-click.
     ("Loading circuit diagrams...", "schemdraw.elements"),
     ("Loading filters...", "core.filtering"),
     ("Loading generic parser...", "core.generic_parser"),
@@ -34,8 +32,8 @@ _SPLASH_STEPS = (
 
 
 def _crash_log_path():
-    """Where the crash log goes: the per-user app data directory, so it
-    needs no write access to the install location."""
+    """Where the crash log goes: the per-user app data directory, so it needs
+    no write access to the install location."""
     from PySide6.QtCore import QStandardPaths
 
     base = QStandardPaths.writableLocation(QStandardPaths.AppDataLocation)
@@ -45,26 +43,15 @@ def _crash_log_path():
 
 
 def _install_crash_reporter():
-    """Make an unhandled failure visible instead of silent.
-
-    PySide6 does not abort on an exception raised inside a slot -- it hands
-    it to sys.excepthook and carries on with a half-updated window. In a
-    windowed launch stderr goes nowhere, so the default outcome is a button
-    that appears to do nothing, with no clue why. Route Python exceptions
-    to a log file *and* a dialog naming that file, and point faulthandler
-    at the same log so a native crash (the one failure mode that really
-    does kill the process) leaves a C-level traceback behind too.
-
-    Returns the log path.
-    """
+    """Make an unhandled failure visible instead of silent."""
     import faulthandler
     import traceback
     from datetime import datetime
 
     log_path = _crash_log_path()
     # Held open for the process lifetime: faulthandler writes to this
-    # descriptor from inside a fault handler, where opening a file is not
-    # safe. Line-buffered so a hard crash can't lose what preceded it.
+    # descriptor from inside a fault handler, where opening a file is unsafe.
+    # Line-buffered so a hard crash cannot lose what preceded it.
     log_file = open(log_path, "a", buffering=1, encoding="utf-8")
     faulthandler.enable(file=log_file)
 
@@ -77,10 +64,9 @@ def _install_crash_reporter():
         log_file.write(f"\n=== {datetime.now():%Y-%m-%d %H:%M:%S} ===\n{text}")
         sys.stderr.write(text)
 
-        # One dialog per distinct traceback, and never a second dialog while
-        # the first is open: an exception thrown from a paint or timer
-        # handler repeats on every event, and a modal box per repeat would
-        # bury the app in unclosable windows.
+        # One dialog per distinct traceback, and never a second while the first
+        # is open: an exception from a paint or timer handler repeats on every
+        # event and would bury the app in unclosable windows.
         if reporting or text in seen:
             return
         seen.add(text)
@@ -108,18 +94,7 @@ def _install_crash_reporter():
 
 
 def _install_hang_watchdog(log_file, seconds=12):
-    """Dump every thread's stack to the log if the GUI stops responding.
-
-    A freeze is the one failure that leaves nothing behind to report:
-    there's no exception, and Windows just offers to close the window.
-    faulthandler's timer runs on its own thread and fires unless something
-    keeps pushing it back, so a QTimer on the event loop pushes it back on
-    every tick. While the GUI is healthy the dump never happens; once the
-    event loop is stuck for `seconds`, the log gets the stack it is stuck
-    inside -- repeatedly, so a slow loop is distinguishable from a deadlock.
-
-    Returns the timer, which the caller must keep a reference to.
-    """
+    """Dump every thread's stack to the log if the GUI stops responding."""
     import faulthandler
 
     from PySide6.QtCore import QTimer
@@ -130,8 +105,7 @@ def _install_hang_watchdog(log_file, seconds=12):
         )
 
     timer = QTimer()
-    # Comfortably more often than `seconds` so an ordinary slow-but-working
-    # operation never trips it.
+    # Well under `seconds`, so an ordinary slow operation never trips it.
     timer.setInterval(max(1000, int(seconds * 1000 / 3)))
     timer.timeout.connect(rearm)
     timer.start()
@@ -140,11 +114,8 @@ def _install_hang_watchdog(log_file, seconds=12):
 
 
 def _splash_pixmap():
-    """Build the splash background: app icon + name on a dark card.
-
-    Drawn in code (rather than shipping a PNG) so it always matches
-    ICON_PATH and needs no extra asset to keep in sync.
-    """
+    """Build the splash background: app icon + name on a dark card. Drawn in
+    code rather than shipped as a PNG, so it always matches ICON_PATH."""
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 
@@ -173,19 +144,15 @@ def _splash_pixmap():
 
 
 def main() -> None:
-    # freeze_support() first: in a bundled executable it is what stops a
-    # spawned worker from re-running the whole GUI, and it must run before
-    # anything else in the process.
+    # Must run before anything else: in a bundled executable this stops a
+    # spawned worker from re-running the whole GUI.
     multiprocessing.freeze_support()
 
-    # These imports are inside main() deliberately -- do not hoist them to
-    # module scope. ValidationWorker spreads large batches across processes,
-    # and Windows starts each one by spawning a fresh interpreter that
-    # re-imports this file (as __mp_main__) to rebuild its state. At module
-    # scope, PySide6 + pyqtgraph + pyimpspec made that re-import
-    # cost every worker ~8 s and enough memory that a pool of 8 exhausted the
-    # paging file ("DLL load failed ... _core") and died. Down here, a worker
-    # re-importing this module pays for `sys` and `pathlib` and nothing else.
+    # Keep these imports inside main() -- do NOT hoist them to module scope.
+    # ValidationWorker spreads batches across processes, and Windows spawns
+    # each by re-importing this file as __mp_main__. At module scope, PySide6 +
+    # pyqtgraph + pyimpspec cost every worker ~8 s and enough memory that a
+    # pool of 8 exhausted the paging file ("DLL load failed ... _core").
     from importlib import import_module
 
     from PySide6.QtCore import Qt
@@ -193,8 +160,7 @@ def main() -> None:
     from PySide6.QtWidgets import QApplication, QProgressBar, QSplashScreen
 
     app = QApplication(sys.argv)
-    # Organization/application names give QSettings a stable place to persist
-    # the user's theme choice across launches.
+    # Gives QSettings a stable place to persist the theme choice.
     app.setOrganizationName("EIS Batch Analysis")
     app.setApplicationName("EIS Batch Analysis")
     app.setWindowIcon(QIcon(str(ICON_PATH)))
@@ -225,8 +191,8 @@ def main() -> None:
         try:
             import_module(module_name)
         except Exception:
-            # A broken import must surface at the real use site with a real
-            # traceback, not swallowed here where nobody can act on it.
+            # Let a broken import surface at its real use site, with a real
+            # traceback, rather than swallowing it here.
             pass
         progress.setValue(step)
         app.processEvents()

@@ -166,10 +166,9 @@ Path(v1_path).write_text(json.dumps(v1_session))
 assert v1_ecm == {} and v1_ecm_params == {}
 assert v1_datasets[0].source_file == "synthetic"
 assert v1_datasets[0].file_id == 0  # absent in v1 -> defaults to the single-file assumption
-# v1 sessions stored "dataset_label" ("Set 01") rather than a real key; on
-# load that gets resolved back to the now-canonical ds.key (see
-# load_session's _resolve_key), which for this single-dataset session is
-# "0:0" -- not dataset.label itself.
+# v1 sessions stored "dataset_label" ("Set 01") rather than a key. On load it
+# resolves to ds.key (see load_session._resolve_key), which for this
+# single-dataset session is "0:0" -- not dataset.label.
 v1_key = v1_datasets[0].key
 assert v1_validation_params == {("kk", v1_key): {}}
 assert v1_drt_params == {v1_key: {}}
@@ -177,9 +176,9 @@ assert v1_ui_state["manual_masked"] == {}
 assert v1_ui_state["inductive_filter"] is False
 print("v1 backward-compatibility OK, resolved label -> key:", dataset.label, "->", v1_key)
 
-# --- multi-file: two files whose sweeps share the same label ("Set 01") ---
-# must not collide -- this is the whole reason results are keyed by
-# ds.key (file_id:index) rather than ds.label. See core.io_utils.EISDataset.
+# --- multi-file: two files whose sweeps share a label ("Set 01") ---
+# Must not collide, which is why results are keyed by ds.key (file_id:index)
+# rather than ds.label. See core.io_utils.EISDataset.
 dataset_b = EISDataset(DataSet(frequencies=f, impedances=Z * 1.1), index=0, source_file="synthetic_b", file_id=1)
 assert dataset_b.label == dataset.label == "Set 01"
 assert dataset_b.key != dataset.key

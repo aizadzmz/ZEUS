@@ -1,39 +1,6 @@
 #Export analysis output in the Battery Data Alliance's Battery Data Format (BDF)
-"""
-Write sweeps and their analysis results as BDF-aligned CSV plus a JSON-LD
-sidecar. https://github.com/battery-data-alliance/battery-data-format
-
-Two things about BDF shape the whole module:
-
-1. BDF v1 standardizes cycler *time-series*: one row per moment in time, with
-   Test Time / s, Voltage / V and Current / A required. An EIS sweep is one row
-   per *frequency* and has no per-row voltage or current, and the BDA lists a
-   dedicated impedance format as future work. So the spectrum table here uses
-   BDF's own preferred labels for the impedance quantities and omits the
-   time-series trio rather than fabricating a test time -- a file that declares
-   what it actually measured, and that should map onto the eventual EIS spec.
-
-2. The impedance quantities themselves *are* already in the BDF application
-   ontology (all with obligation "optional"), so the column headers below are
-   real BDF terms with resolvable IRIs, not local invention. That is the part
-   worth conforming to: the header row is what makes the file self-describing.
-
-   Note the reference `batterydf` 0.1.0 validates against a hardcoded table of
-   27 columns that predates those terms, so it flags every impedance column as
-   an unrecognized "extra". That is a lag in the released package, not a defect
-   here; test_bdf_export.test_known_gap_between_batterydf_and_the_ontology
-   pins the discrepancy and will fail once upstream catches up.
-
-Kramers-Kronig, DRT and ECM outputs have no BDF terms at all. They go in
-companion files under an explicit "eis:" prefix that the sidecar maps to a
-local namespace, so nothing here can be mistaken for a standardized quantity.
-
-Written with the standard library's csv/json rather than the reference
-`batterydf` package on purpose: batterydf depends on pandas and pyarrow, the
-pair that crashed the Qt GUI (see core/generic_parser.py). batterydf is a dev
-dependency, used only by test/test_bdf_export.py to check this output against
-the real spec in a headless process.
-"""
+"""Write sweeps and their analysis results as BDF-aligned CSV plus a JSON-LD
+sidecar. https://github.com/battery-data-alliance/battery-data-format"""
 from __future__ import annotations
 
 import csv
@@ -60,9 +27,8 @@ BDF_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("phase_degree", "Phase / deg"),
 )
 
-# Quantities this app produces that BDF has no term for. Kept under a URN so a
-# reader can tell at a glance that they are app-local, and so they can never
-# collide with a real BDF term if one is added later.
+# Quantities BDF has no term for. Under a URN so they read as app-local and
+# can never collide with a real BDF term added later.
 LOCAL_NAMESPACE = "urn:eis-batch-analysis:term:"
 
 SPECTRUM_SUFFIX = ".bdf.csv"
@@ -85,13 +51,7 @@ def _app_version() -> str:
 
 
 def _num(value) -> str:
-    """Format one number for CSV.
-
-    Non-finite values become an empty cell: NaN is how pyimpspec reports "no
-    estimate available" (an unestimated standard error, say), and an empty cell
-    is how CSV says the same thing. Writing the literal "nan" would instead
-    hand readers a string where they expect a float.
-    """
+    """Format one number for CSV."""
     number = float(value)
     if not np.isfinite(number):
         return ""
@@ -109,22 +69,13 @@ def _write_csv(path: Path, header: Iterable[str], rows: Iterable[Iterable]) -> P
 
 
 def _safe_stem(text: str) -> str:
-    """Make a filename component safe on Windows, which rejects <>:"/\\|?* and
-    is the platform this app targets."""
+    r"""Make a filename component safe on Windows, which rejects <>:"/\|?*."""
     cleaned = "".join("_" if c in '<>:"/\\|?*' else c for c in text)
     return cleaned.strip(" .") or "sweep"
 
 
 def file_stem(dataset: EISDataset, metadata: Optional[dict] = None, sequence: int = 1) -> str:
-    """
-    Build the filename stem for one sweep.
-
-    BDF recommends InstitutionCode__CellName__YYYYMMDD_XXX. That needs an
-    institution and a cell name, neither of which this app captures today, so
-    the convention is followed only when a caller supplies both via metadata
-    and the sweep's own full_label ("myfile_set01") is used otherwise. A
-    made-up institution code would be worse than an honest local name.
-    """
+    """Build the filename stem for one sweep."""
     metadata = metadata or {}
     institution = str(metadata.get("institution_code") or "").strip()
     cell = str(metadata.get("cell_name") or "").strip()
@@ -137,22 +88,7 @@ def file_stem(dataset: EISDataset, metadata: Optional[dict] = None, sequence: in
 # ---- spectrum ----
 
 def write_spectrum(path: Path, dataset: EISDataset, kept_only: bool = True) -> Path:
-    """
-    Write one sweep's impedance spectrum as BDF-aligned CSV.
-
-    kept_only=True (the default) exports the points still retained -- what the
-    eraser and the inductive filter left on screen -- so the file matches what
-    the user is looking at. kept_only=False exports every measured point.
-
-    Note the flag is deliberately not pyimpspec's `masked`, which is inverted
-    relative to how it reads: masked=False selects the points that were *not*
-    omitted, and masked=True selects the omitted ones. Passing this function's
-    boolean straight through would export precisely the erased points.
-
-    Magnitude and phase are derived from the complex impedance rather than
-    required from the source file, since only some of the supported input
-    formats carry them.
-    """
+    """Write one sweep's impedance spectrum as BDF-aligned CSV."""
     masked = False if kept_only else None
     frequencies = dataset.data.get_frequencies(masked=masked)
     impedances = dataset.data.get_impedances(masked=masked)
@@ -187,15 +123,7 @@ def write_residuals(path: Path, result) -> Path:
 
 
 def write_ecm_parameters(path: Path, fits: Dict[str, object]) -> Path:
-    """
-    Fitted circuit parameters for one sweep, one row per parameter.
-
-    Takes every circuit fitted to that sweep keyed by CDC, because
-    gui.main_window keys ECM results by (circuit, sweep) so that competing
-    candidate circuits coexist. The circuit column is what keeps them apart,
-    and pseudo chi-squared is repeated on each row so a reader can rank
-    circuits without needing the sidecar.
-    """
+    """Fitted circuit parameters for one sweep, one row per parameter."""
     rows = []
     for cdc in sorted(fits):
         result = fits[cdc]
@@ -230,9 +158,8 @@ def write_ecm_parameters(path: Path, fits: Dict[str, object]) -> Path:
 
 
 def write_ecm_fit_curve(path: Path, result, num_per_decade: int = 20) -> Path:
-    """The fitted circuit's own impedance response, interpolated. Written
-    alongside the parameters so the fit can be re-plotted without re-deriving
-    it from the circuit."""
+    """The fitted circuit's interpolated impedance response, written alongside
+    the parameters so the fit can be re-plotted."""
     frequencies = result.get_frequencies(num_per_decade=num_per_decade)
     impedances = result.get_impedances(num_per_decade=num_per_decade)
     rows = (
@@ -243,14 +170,7 @@ def write_ecm_fit_curve(path: Path, result, num_per_decade: int = 20) -> Path:
 
 
 def write_drt(path: Path, result) -> Path:
-    """
-    A DRT result as tau vs gamma.
-
-    TR-RBF returns (tau, gamma) and BHT returns (tau, gamma_re, gamma_im),
-    since BHT estimates the distribution separately from each part of the
-    impedance; the column set follows whichever was run. TR-RBF credible
-    intervals are appended when the Bayesian run produced them.
-    """
+    """A DRT result as tau vs gamma."""
     data = result.get_drt_data()
     taus, gammas = data[0], data[1]
 
@@ -276,13 +196,7 @@ def write_drt(path: Path, result) -> Path:
 
 
 def write_drt_peaks(path: Path, peaks) -> Path:
-    """
-    Fitted DRT peaks, one row each.
-
-    tau and gamma are reconstructed from each peak's relative position/height
-    using the same arithmetic as DRTPeaks.to_peaks_dataframe, deliberately not
-    by calling it: that method imports pandas, and this module must not.
-    """
+    """Fitted DRT peaks, one row each."""
     rows = []
     for index, peak in enumerate(peaks.peaks):
         tau = 10 ** ((peak.position * peak.x_scale) + peak.x_offset)
@@ -313,8 +227,7 @@ def write_drt_peaks(path: Path, peaks) -> Path:
 
 def _variable_measured() -> List[dict]:
     """The spectrum's columns as schema.org PropertyValues, each pointing at
-    its BDF ontology IRI. This is the self-describing part: a reader that
-    follows propertyID gets the canonical definition and unit."""
+    its BDF ontology IRI."""
     return [
         {
             "@type": "PropertyValue",
@@ -335,16 +248,7 @@ def build_sidecar(
     analysis: Optional[dict] = None,
     metadata: Optional[dict] = None,
 ) -> dict:
-    """
-    Build the JSON-LD sidecar for one sweep.
-
-    Only facts the app actually holds are written. Cell chemistry, ambient
-    temperature and instrument are *omitted* rather than emitted empty, because
-    an absent field reads as unknown while a blank one invites a reader to
-    trust it. A caller-supplied metadata dict is merged in last and can add
-    exactly those fields once there is a UI to collect them -- which is why
-    this takes a dict rather than a fixed set of arguments.
-    """
+    """Build the JSON-LD sidecar for one sweep."""
     total_points = dataset.data.get_num_points(masked=None)
     # masked=False is pyimpspec for "the points that were not omitted".
     kept_points = dataset.data.get_num_points(masked=False)
@@ -424,16 +328,8 @@ def export_batch(
     metadata: Optional[dict] = None,
     kept_only: bool = True,
 ) -> List[Path]:
-    """
-    Export every sweep, plus whichever analyses have been run, into directory.
-
-    The result dicts are exactly gui.main_window's own state, passed through
-    unchanged -- validation and ECM keyed by tuples ((method, sweep) and
-    (circuit, sweep) respectively), DRT keyed by sweep alone. Anything left
-    None is simply skipped, so a session with no DRT produces no DRT files.
-
-    Returns every path written, spectra first for each sweep.
-    """
+    """Export every sweep, plus whichever analyses have been run, into
+    directory."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -532,9 +428,8 @@ def export_batch(
 
 
 def _jsonable(value):
-    """Coerce the GUI's stored analysis parameters into something json.dump
-    accepts with allow_nan=False. They are plain dicts of widget values, but
-    numpy scalars and NaNs get in via spin boxes and pyimpspec defaults."""
+    """Coerce stored analysis parameters into something json.dump accepts with
+    allow_nan=False."""
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
