@@ -4,7 +4,6 @@ import pyqtgraph as pg
 import qdarktheme
 
 from gui import style
-from gui.style import ACCENT
 
 THEMES = ("light", "dark")
 
@@ -19,15 +18,17 @@ def apply_theme(mode: str) -> None:
     """Apply ``mode`` ("light" or "dark") to Qt and PyQtGraph."""
     if mode not in THEMES:
         mode = "light"
+    t = style.tokens(mode)
+    # Per-mode, not the bare ACCENT: navy is near-black against the dark
+    # background, so dark mode drives qdarktheme from its lightened accent.
     qdarktheme.setup_theme(
         mode,
-        custom_colors={"primary": ACCENT},
+        custom_colors={"primary": t["accent"]},
         additional_qss=style.build_app_qss(mode),
     )
     style.apply_app_font()
 
     # PyQtGraph has no figure/axes split: "background" covers both, and
     # "foreground" covers axis lines, ticks, and labels together.
-    t = style.tokens(mode)
     pg.setConfigOption("background", t["surface"])
     pg.setConfigOption("foreground", t["text"])

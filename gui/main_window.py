@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Tuple
 
@@ -18,6 +19,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QStackedWidget,
+    QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -36,7 +38,6 @@ from gui.steps.base import (
     DEFAULT_SETTINGS_WIDTH,
     MAX_SETTINGS_WIDTH,
     MIN_SETTINGS_WIDTH,
-    add_combo_items,
 )
 from gui.steps.data_viz_step import DataVizStep
 from gui.steps.drt_step import DRTStep
@@ -48,9 +49,11 @@ from gui.workers import DRTWorker, ECMWorker, ValidationWorker
 
 VALIDATION_METHODS = ("Kramers-Kronig", "Z-HIT")
 
-# Circuit schematics the ECM step draws before falling back to the text
-# report. One per (sweep, fitted circuit).
-MAX_CIRCUIT_DIAGRAMS = 12
+# Circuit edits kept for undo, as CDC snapshots.
+MAX_CIRCUIT_UNDO = 50
+# Significant figures written into the CDC field by a canvas edit. Enough for a
+# starting guess, and short enough that the code stays readable.
+CIRCUIT_CDC_DECIMALS = 6
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.ico"
 
 
@@ -91,7 +94,7 @@ def _parse_file(path: str, file_id: int):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("EIS Batch Analysis — Parser & Plotter")
+        self.setWindowTitle("ZEUS")
         self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.resize(1200, 800)
 
@@ -118,6 +121,8 @@ class MainWindow(QMainWindow):
         self._worker_errors: List[Tuple[str, str]] = []
         # Method of the run in flight, for the progress message.
         self._running_method = ""
+        # The sweeps it covers, so the prune summary can be built once it ends.
+        self._running_keys: List[str] = []
         # {ds.key: TRRBFResult | BHTResult} -- last DRT run wins
         self._drt_results = {}
         # {ds.key: effective kwargs}
@@ -140,6 +145,22 @@ class MainWindow(QMainWindow):
         self._ecm_worker_errors: List[Tuple[str, str]] = []
         # As _pending_drt_params, plus the canonical CDC the cache key needs.
         self._pending_ecm: dict = {}
+        # The editable circuit behind the canvas. Derived from the CDC field,
+        # which stays the source of truth; _ecm_syncing marks writes that came
+        # from the canvas, so the tree is not rebuilt from its own output.
+        self._ecm_tree = None
+        self._ecm_syncing = False
+        self._ecm_undo: List[str] = []
+        self._ecm_redo: List[str] = []
+        self._ecm_editor = None
+        # What the canvas currently shows, so a redundant redraw can be skipped.
+        self._ecm_drawn = None
+        # textChanged fires per keystroke, and the ECM overlay/report follow the
+        # code box; coalesce so only the settled text costs a rebuild.
+        self._ecm_display_timer = QTimer(self)
+        self._ecm_display_timer.setSingleShot(True)
+        self._ecm_display_timer.setInterval(250)
+        self._ecm_display_timer.timeout.connect(self._refresh_ecm_display)
         # Steps replot lazily: _refresh() does the cheap masking/validity
         # bookkeeping and marks every step dirty, but only the visible step
         # redraws. Switching steps renders whichever was left dirty.
@@ -176,6 +197,8 @@ class MainWindow(QMainWindow):
         # Apply the theme once the widgets exist, then reflect the current
         # mode in the menu without re-triggering the toggle handler.
         apply_theme(self._theme_mode)
+        self.step_bar.set_theme_mode(self._theme_mode)
+        self.data_viz_step.files_panel.set_theme_mode(self._theme_mode)
         self.dark_action.blockSignals(True)
         self.dark_action.setChecked(self._theme_mode == "dark")
         self.dark_action.blockSignals(False)
@@ -214,7 +237,7 @@ class MainWindow(QMainWindow):
 
         # One QAction backs the menu item, the status-bar button, and the
         # shortcut, so their checked states stay in sync automatically.
-        self.dark_action = QAction("🌙", self, checkable=True)
+        self.dark_action = QAction("Dark mode", self, checkable=True)
         self.dark_action.setShortcut("Ctrl+D")
         self.dark_action.setStatusTip("Toggle between light and dark themes (Ctrl+D)")
         self.dark_action.toggled.connect(self._on_theme_toggled)
@@ -239,6 +262,18 @@ class MainWindow(QMainWindow):
         self.step_bar = StepBar()
         self.step_bar.step_selected.connect(self._on_step_selected)
         root.addWidget(self.step_bar)
+
+        # Says why the window has gone dead, and how to get it back. Its own
+        # label rather than the warning banner below, which _refresh() owns.
+        self.eraser_banner = QLabel(
+            "Eraser on — the rest of the window is locked. Click points on the "
+            "spectrum to remove or restore them, then switch the Eraser button "
+            "on the plot off to carry on."
+        )
+        self.eraser_banner.setWordWrap(True)
+        self.eraser_banner.setObjectName("warningBanner")
+        self.eraser_banner.hide()
+        root.addWidget(self.eraser_banner)
 
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
@@ -277,7 +312,7 @@ class MainWindow(QMainWindow):
         self.drt_step.drt_pane.set_message(
             "Run a DRT on the left to see the distribution of relaxation times."
         )
-        self.drt_step.peaks_text.clear()
+        self.drt_step.peaks_table.setRowCount(0)
         self.ecm_step.spectrum_pane.set_message("No sweep selected.")
         self.ecm_step.params_text.clear()
         self.data_viz_step.details_text.clear()
@@ -302,18 +337,25 @@ class MainWindow(QMainWindow):
 
         val = self.validation_step
         val.inductive_check.toggled.connect(self._refresh)
-        val.eraser_check.toggled.connect(self._on_eraser_toggled)
         val.kk_radio.toggled.connect(self._on_method_changed)
         val.threshold_spin.valueChanged.connect(self._refresh)
+        # The mode decides which limit the stored results are rejected against,
+        # so switching it re-masks without re-running. max_removed is read at
+        # run time only, so it needs no wiring.
+        val.basic_radio.toggled.connect(self._refresh)
+        val.hard_limit_spin.valueChanged.connect(self._refresh)
+        # Not applied on redraw -- it is spent during a run -- but it moves the
+        # second line on the residual plot.
+        val.soft_limit_spin.valueChanged.connect(self._refresh)
         val.run_validation_button.clicked.connect(self._run_validation)
         val.residuals_plot_button.clicked.connect(self._on_plot_residuals_clicked)
 
         drt = self.drt_step
-        drt.run_simple_button.clicked.connect(self._run_drt_simple)
-        drt.run_bayesian_button.clicked.connect(self._run_drt_bayesian)
-        drt.run_bht_button.clicked.connect(self._run_drt_bht)
+        # Redraws the measured plot with the dropped points greyed out; the
+        # masks themselves, and so every other step, are untouched.
+        drt.remove_inductive_check.toggled.connect(self._refresh)
+        drt.run_drt_button.clicked.connect(self._run_drt)
         drt.run_peak_analysis_button.clicked.connect(self._run_peak_analysis)
-        drt.measured_radio.toggled.connect(self._on_drt_top_view_changed)
         drt.export_results_button.clicked.connect(self._export_drt_results)
 
         ecm = self.ecm_step
@@ -321,13 +363,55 @@ class MainWindow(QMainWindow):
         ecm.build_from_drt_button.clicked.connect(self._build_circuit_from_drt)
         ecm.cdc_edit.textChanged.connect(self._on_ecm_cdc_changed)
         ecm.run_button.clicked.connect(self._run_ecm_fit)
-        ecm.shown_combo.currentIndexChanged.connect(self._on_ecm_shown_changed)
         ecm.export_params_button.clicked.connect(self._export_ecm_parameters)
 
+        from core.circuit_model import (
+            add_branch,
+            add_in_series,
+            delete,
+            duplicate,
+            insert_at,
+            wrap_in_parallel,
+        )
+        from gui.circuit_canvas import fill_element_menu
+
+        canvas = ecm.canvas
+        canvas.element_activated.connect(self._on_ecm_element_activated)
+        canvas.insert_requested.connect(
+            lambda cid, index, symbol: self._edit_ecm_circuit(insert_at, cid, index, symbol)
+        )
+        canvas.add_branch_requested.connect(
+            lambda cid, symbol: self._edit_ecm_circuit(add_branch, cid, symbol)
+        )
+        canvas.add_series_requested.connect(
+            lambda nid, symbol: self._edit_ecm_circuit(add_in_series, nid, symbol)
+        )
+        canvas.wrap_requested.connect(
+            lambda nid, symbol: self._edit_ecm_circuit(wrap_in_parallel, nid, symbol)
+        )
+        canvas.duplicate_requested.connect(lambda nid: self._edit_ecm_circuit(duplicate, nid))
+        canvas.delete_requested.connect(lambda nid: self._edit_ecm_circuit(delete, nid))
+        canvas.undo_requested.connect(self._undo_ecm_edit)
+        canvas.redo_requested.connect(self._redo_ecm_edit)
+
+        # Filled on first open, not now: listing the elements imports pyimpspec,
+        # which would cost ~4 s while the window is still being built.
+        ecm.add_element_menu.aboutToShow.connect(
+            lambda: fill_element_menu(ecm.add_element_menu, self._append_ecm_element)
+            if ecm.add_element_menu.isEmpty()
+            else None
+        )
+        ecm.undo_button.clicked.connect(self._undo_ecm_edit)
+        ecm.redo_button.clicked.connect(self._redo_ecm_edit)
+        ecm.clear_circuit_button.clicked.connect(self._clear_ecm_circuit)
+        ecm.fitted_values_radio.toggled.connect(self._on_ecm_values_mode_changed)
+        self._update_ecm_undo_buttons()
+
         # The eraser works on both the Data Visualisation and Validation
-        # spectra; one checkbox arms them together.
+        # spectra; either pane's Eraser button arms them together.
         for pane in (viz.spectrum_pane, val.spectrum_pane):
             pane.point_mask_toggled.connect(self._on_point_mask_toggled)
+            pane.eraser_toggled.connect(self._on_eraser_toggled)
 
         viz.spectrum_pane.replot_requested.connect(self._force_replot_spectrum)
         val.spectrum_pane.replot_requested.connect(self._force_replot_spectrum)
@@ -354,7 +438,7 @@ class MainWindow(QMainWindow):
         )
 
         self._update_validation_button_text()
-        self._update_ecm_shown_combo()
+        self._update_ecm_coverage()
         self._update_residuals_header(0, 0)
         self._sync_display_mode_widgets()
 
@@ -373,17 +457,20 @@ class MainWindow(QMainWindow):
         incoming = self._spectrum_pane_for(index)
         if incoming is not None and self._spectrum_view_state is not None:
             incoming.set_view_state(self._spectrum_view_state)
+        # The circuit is not tied to any sweep, so it draws even with no data
+        # -- _render_active_step returns early before a file is opened.
+        if index == 3:
+            self._render_ecm_circuits()
         self._render_active_step()
 
     def _spectrum_pane_for(self, index: int):
-        """The pane showing the measured spectrum on a given step, if any. The
-        DRT upper pane counts only while showing the spectrum."""
+        """The pane showing the measured spectrum on a given step, if any."""
         if index == 0:
             return self.data_viz_step.spectrum_pane
         if index == 1:
             return self.validation_step.spectrum_pane
         if index == 2:
-            return self.drt_step.top_pane if self.drt_step.top_view == "Measured" else None
+            return self.drt_step.top_pane
         if index == 3:
             return self.ecm_step.spectrum_pane
         return None
@@ -566,6 +653,8 @@ class MainWindow(QMainWindow):
         self._ecm_shown_cdc = None
         self._manual_masked = {}
         self._manual_kept = {}
+        self._running_keys = []
+        self.validation_step.prune_status_label.clear()
         # Nothing validated yet, so the residual plot starts blank.
         self._residuals_armed = False
 
@@ -708,12 +797,11 @@ class MainWindow(QMainWindow):
 
         if not self._datasets:
             self.statusBar().showMessage("Open a .mpt, .txt, or .csv file to begin.")
-            self.ecm_step.circuit_pane.clear()
             self._show_empty_state()
             # This branch returns before _refresh(), which normally
-            # repopulates the circuit picker; do it here so the picker stops
-            # offering circuits from the removed file.
-            self._update_ecm_shown_combo()
+            # refreshes the ECM coverage line; do it here so it stops counting
+            # sweeps from the removed file.
+            self._update_ecm_coverage()
             self._pending = None
             self._step_dirty.clear()
             return
@@ -762,6 +850,10 @@ class MainWindow(QMainWindow):
             self._validation_method,
             self.validation_step.inductive_check.isChecked(),
             self.validation_step.threshold_spin.value(),
+            self.validation_step.mode,
+            self.validation_step.soft_limit_spin.value(),
+            self.validation_step.hard_limit_spin.value(),
+            self.validation_step.max_removed_spin.value(),
         )
         try:
             save_session(
@@ -951,8 +1043,8 @@ class MainWindow(QMainWindow):
         self._drt_peaks = drt_peaks
         self._ecm_results = ecm_results
         self._ecm_params = ecm_params
-        # Not saved in a session; _update_ecm_shown_combo settles on the first
-        # fitted circuit, as with the active step and the Nyquist/Bode choice.
+        # Not saved in a session; _update_ecm_coverage re-derives it from the
+        # restored circuit code, as with the active step and Nyquist/Bode.
         self._ecm_shown_cdc = None
         self._manual_masked = ui_state["manual_masked"]
         self._manual_kept = ui_state["manual_kept"]
@@ -979,11 +1071,13 @@ class MainWindow(QMainWindow):
         self.validation_step.inductive_check.setChecked(bool(ui_state.get("inductive_filter", False)))
         self.validation_step.inductive_check.blockSignals(False)
 
-        threshold = ui_state.get("residual_threshold")
-        if threshold is not None:
-            self.validation_step.threshold_spin.blockSignals(True)
-            self.validation_step.threshold_spin.setValue(threshold)
-            self.validation_step.threshold_spin.blockSignals(False)
+        self.validation_step.set_limits(
+            threshold=ui_state.get("residual_threshold"),
+            soft=ui_state.get("soft_limit"),
+            hard=ui_state.get("hard_limit"),
+            max_removed=ui_state.get("max_removed"),
+        )
+        self.validation_step.set_mode(ui_state.get("validation_mode", "Basic"))
 
         self.statusBar().showMessage(
             f"Restored session from '{Path(path).name}' "
@@ -1017,16 +1111,42 @@ class MainWindow(QMainWindow):
 
     def _on_eraser_toggled(self, checked: bool) -> None:
         """A mode switch only -- no mask changes, so no _refresh(). Arms the
-        Data Visualisation and Validation spectrum panes together."""
+        Data Visualisation and Validation spectrum panes together, and takes
+        the rest of the window out of reach until it is switched off."""
         for step in (self.data_viz_step, self.validation_step):
             step.spectrum_pane.set_eraser_enabled(checked)
+        self._set_eraser_lock(checked)
         if checked:
             self.statusBar().showMessage(
-                "Eraser on — click a point on the Data Visualisation or "
-                "Validation plot to remove it, or a grey × to restore it."
+                "Eraser on — click a point to remove it, or a grey × to "
+                "restore it."
             )
         else:
             self.statusBar().showMessage("Eraser off.")
+
+    def _set_eraser_lock(self, locked: bool) -> None:
+        """Make the eraser modal: while it is on, only the spectra respond.
+        The menus, the step bar and every step's controls go dead, so an erase
+        cannot be interleaved with a step change or a re-run that would leave
+        the two disagreeing about which points are in.
+
+        The one live control is the Eraser button on the plot overlay, which is
+        why it lives there rather than in a settings column."""
+        for action in (
+            self.open_session_action,
+            self.save_session_action,
+            self.export_bdf_action,
+            self.dark_action,
+        ):
+            # Disabled individually as well as via the menu bar: their
+            # shortcuts are owned by this window and would still fire.
+            action.setEnabled(not locked)
+        self.menuBar().setEnabled(not locked)
+        self.step_bar.setEnabled(not locked)
+        for step in self._steps():
+            step.set_controls_locked(locked)
+
+        self.eraser_banner.setVisible(locked)
 
     def _on_point_mask_toggled(self, key: str, index: int) -> None:
         """Flip one point's manual override; _refresh() recomposes the mask and
@@ -1052,6 +1172,9 @@ class MainWindow(QMainWindow):
     def _on_theme_toggled(self, checked: bool) -> None:
         self._theme_mode = "dark" if checked else "light"
         apply_theme(self._theme_mode)
+        # Self-painted, so they take no colors from the stylesheet.
+        self.step_bar.set_theme_mode(self._theme_mode)
+        self.data_viz_step.files_panel.set_theme_mode(self._theme_mode)
         self._settings.setValue("theme", self._theme_mode)
         # Regenerate existing figures so plot colors follow the new theme.
         if self._datasets:
@@ -1063,14 +1186,19 @@ class MainWindow(QMainWindow):
             return
         # Module-level functions, so ValidationWorker can pickle the runner by
         # reference when it spreads a batch over processes.
-        from core.validation import run_kk_test, run_zhit
+        from core.validation import prune_iteratively, run_kk_test, run_zhit
 
         method = self._validation_method
         runner = run_kk_test if method == VALIDATION_METHODS[0] else run_zhit
+        if self.validation_step.mode == "Advanced":
+            # partial of module-level callables, so this still pickles into the
+            # process pool -- a closure or a bound method would not.
+            runner = partial(prune_iteratively, runner=runner, **self._prune_settings())
 
         # Masks must stay stable while the worker reads them, so the settings
         # panels are locked for the run.
         self._worker_errors = []
+        self._running_keys = [ds.key for ds in selected]
         self._worker = ValidationWorker(method, runner, selected, parent=self)
         self._worker.result_ready.connect(self._on_validation_result)
         self._worker.error.connect(self._on_validation_error)
@@ -1082,17 +1210,43 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Running {method} analysis… 0 of {len(selected)}")
         self._worker.start()
 
+    def _prune_settings(self) -> dict:
+        """The iterative prune's limits, as core.validation.prune_iteratively
+        takes them."""
+        return dict(
+            hard_percent=self.validation_step.hard_limit_spin.value(),
+            soft_percent=self.validation_step.soft_limit_spin.value(),
+            max_removed=self.validation_step.max_removed_spin.value(),
+        )
+
+    def _pruned_points(self, method: str, key: str) -> List[int]:
+        """The points a stored result had already been pruned of. Empty for a
+        basic run -- and inseparable from the result for an advanced one, which
+        was fitted with exactly these points gone."""
+        return self._validation_params.get((method, key), {}).get("pruned_points", [])
+
     def _on_validation_result(self, method: str, key: str, result) -> None:
-        self._validation_results[(method, key)] = result
+        from core.validation import PruneOutcome
+
         # Z-HIT takes no extra kwargs; these mirror the non-default arguments
         # in core.validation.run_kk_test's signature.
-        if method == VALIDATION_METHODS[0]:
-            self._validation_params[(method, key)] = {
-                "admittance": False,
-                "num_F_ext_evaluations": 10,
-            }
-        else:
-            self._validation_params[(method, key)] = {}
+        params = (
+            {"admittance": False, "num_F_ext_evaluations": 10}
+            if method == VALIDATION_METHODS[0]
+            else {}
+        )
+        if isinstance(result, PruneOutcome):
+            # The removals are part of how this result was produced, not a
+            # separate cache: without them it does not describe any point set.
+            params.update(
+                self._prune_settings(),
+                pruned_points=list(result.removed),
+                passes=result.passes,
+                stop_reason=result.stop_reason,
+            )
+            result = result.result
+        self._validation_results[(method, key)] = result
+        self._validation_params[(method, key)] = params
 
     def _on_validation_progress(self, done: int, total: int) -> None:
         """A count, not a name: sweeps run in a process pool and finish out of
@@ -1104,10 +1258,28 @@ class MainWindow(QMainWindow):
     def _on_validation_error(self, key: str, message: str) -> None:
         self._worker_errors.append((key, message))
 
+    def _report_prune(self) -> None:
+        """Summarise what the run that just ended pruned, per sweep. Silent
+        after a basic run, which removes nothing during the run itself."""
+        label = self.validation_step.prune_status_label
+        lines = []
+        for key in self._running_keys:
+            params = self._validation_params.get((self._running_method, key), {})
+            if "pruned_points" not in params:
+                continue
+            removed = len(params["pruned_points"])
+            note = "" if params["stop_reason"] == "converged" else f", {params['stop_reason']}"
+            lines.append(
+                f"{self._display_label(key)}: {removed} point(s) over "
+                f"{params['passes']} pass(es){note}"
+            )
+        label.setText("\n".join(lines))
+
     def _on_validation_finished(self) -> None:
         self._worker = None
         self._set_controls_enabled(True)
         self._update_validation_button_text()
+        self._report_prune()
         self.statusBar().showMessage("Validation finished.")
         if self._worker_errors:
             details = "\n".join(
@@ -1127,6 +1299,29 @@ class MainWindow(QMainWindow):
             shape_coeff=self.drt_step.shape_coeff_spin.value(),
         )
 
+    def _drt_inputs(self, datasets: List) -> List:
+        """The sweeps the DRT sees, which are not necessarily the sweeps
+        themselves: the DRT step's own inductive-tail filter is applied to
+        copies. The shared mask stays put, so a validation run done without
+        that filter is not marked stale by turning it on here -- and the copies
+        are what make this safe to hand to the Bayesian worker thread, which
+        runs while the UI still draws the originals."""
+        if not self.drt_step.remove_inductive_check.isChecked():
+            return datasets
+
+        from core.filtering import inductive_tail_removed
+
+        return [inductive_tail_removed(ds) for ds in datasets]
+
+    def _drt_record(self, params: dict) -> dict:
+        """What gets saved/exported for a run. The filter changes the input
+        data rather than the algorithm, so run_drt never sees it as a kwarg,
+        but a reader of the session needs to know it was on."""
+        return dict(
+            params,
+            remove_inductive_tail=self.drt_step.remove_inductive_check.isChecked(),
+        )
+
     def _update_optimal_lambda_label(self, selected: List) -> None:
         lambda_value = None
         if len(selected) == 1:
@@ -1135,6 +1330,16 @@ class MainWindow(QMainWindow):
         self.drt_step.optimal_lambda_label.setText(
             f"{lambda_value:.4g}" if lambda_value is not None else "—"
         )
+
+    def _run_drt(self) -> None:
+        """Run DRT, dispatching on the method chosen in the settings panel."""
+        method = self.drt_step.method
+        if method == "trrbf":
+            self._run_drt_simple()
+        elif method == "bayesian":
+            self._run_drt_bayesian()
+        else:
+            self._run_drt_bht()
 
     def _run_drt_simple(self) -> None:
         selected = self._selected_datasets()
@@ -1152,21 +1357,22 @@ class MainWindow(QMainWindow):
             lambda_value=self.drt_step.lambda_spin.value(),
             credible_intervals=False,
         )
+        recorded = self._drt_record(params)
         errors = []
-        for ds in selected:
+        for ds in self._drt_inputs(selected):
             try:
                 self._drt_results[ds.key] = run_drt(ds, **params)
             except Exception as exc:
                 errors.append((ds.key, str(exc)))
             else:
-                self._drt_params[ds.key] = params
+                self._drt_params[ds.key] = recorded
 
         if errors:
             details = "\n".join(f"- {self._display_label(key)}: {msg}" for key, msg in errors)
             QMessageBox.warning(self, "DRT errors", f"Some sweeps failed:\n{details}")
 
         self._update_optimal_lambda_label(selected)
-        self.statusBar().showMessage(f"Simple Run DRT computed for {len(selected) - len(errors)} sweep(s).")
+        self.statusBar().showMessage(f"Simple run DRT computed for {len(selected) - len(errors)} sweep(s).")
         self._refresh()
 
     def _run_drt_bayesian(self) -> None:
@@ -1203,9 +1409,9 @@ class MainWindow(QMainWindow):
         def runner(ds):
             return run_drt(ds, **params)
 
-        self._pending_drt_params = params
+        self._pending_drt_params = self._drt_record(params)
         self._drt_worker_errors = []
-        self._drt_worker = DRTWorker(runner, selected, parent=self)
+        self._drt_worker = DRTWorker(runner, self._drt_inputs(selected), parent=self)
         self._drt_worker.result_ready.connect(self._on_drt_worker_result)
         self._drt_worker.error.connect(self._on_drt_worker_error)
         self._drt_worker.finished.connect(self._on_drt_worker_finished)
@@ -1241,14 +1447,15 @@ class MainWindow(QMainWindow):
 
         settings = self._drt_settings()
         params = dict(settings, num_samples=self.drt_step.num_samples_spin.value())
+        recorded = self._drt_record(params)
         errors = []
-        for ds in selected:
+        for ds in self._drt_inputs(selected):
             try:
                 self._drt_results[ds.key] = run_drt_bht(ds, **params)
             except Exception as exc:
                 errors.append((ds.key, str(exc)))
             else:
-                self._drt_params[ds.key] = params
+                self._drt_params[ds.key] = recorded
 
         if errors:
             details = "\n".join(f"- {self._display_label(key)}: {msg}" for key, msg in errors)
@@ -1293,6 +1500,7 @@ class MainWindow(QMainWindow):
     def _on_ecm_preset_changed(self, _index: int) -> None:
         """Preset -> CDC box. One-way: the text box is the source of truth and
         the combo only fills it, so later edits leave the combo as-is."""
+        self._push_ecm_undo()
         self.ecm_step.cdc_edit.setText(self.ecm_step.preset_combo.currentData())
 
     def _build_circuit_from_drt(self) -> None:
@@ -1307,7 +1515,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Build circuit from DRT",
                 "No DRT peak analysis for the selected sweep(s).\n\n"
-                "Run a DRT calculation (7) and then 'Peak deconvolution' (8) "
+                "Run a DRT calculation (7) and then 'Run deconvolution' (8) "
                 "first — the peaks are what decide how many RC elements the "
                 "circuit needs.",
             )
@@ -1321,6 +1529,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Build circuit from DRT", str(exc))
             return
 
+        self._push_ecm_undo()
         self.ecm_step.cdc_edit.setText(cdc)
         num_pairs = cdc.count("(")
         self.statusBar().showMessage(
@@ -1338,52 +1547,309 @@ class MainWindow(QMainWindow):
         style.set_state(self.ecm_step.cdc_status_label, "ok" if ok else "error")
         self.ecm_step.run_button.setEnabled(ok)
 
+        # Typed edits rebuild the canvas's tree; canvas edits wrote this text in
+        # the first place and must not have it parsed back over them.
+        if not self._ecm_syncing:
+            self._rebuild_ecm_tree(text, ok)
+
         # The ECM step previews this code as a schematic while nothing is
         # fitted, so redraw immediately for the preview. Once there are fits,
         # only mark dirty: rendering also rebuilds the text report, which would
         # make typing lag.
         self._step_dirty.add(3)
-        fitted_keys = {key for _, key in self._ecm_results}
-        previewing = self._pending is None or not any(
-            ds.key in fitted_keys for ds in self._pending["selected"]
-        )
-        if previewing:
-            self._render_active_step()
+        # The canvas is the editing surface, so it always follows the code --
+        # _render_ecm_circuits skips the redraw when nothing it draws changed.
+        self._render_ecm_circuits()
 
-    def _on_ecm_shown_changed(self, _index: int) -> None:
-        """Switch which fitted circuit the ECM step draws. Needs a full
-        _refresh(), since _pending's fit curves are per-circuit."""
-        data = self.ecm_step.shown_combo.currentData()
-        if data is None or data == self._ecm_shown_cdc:
+        # The plots and the text report follow this code box now, so they have
+        # to keep up with it -- but rebuilding them per keystroke would make
+        # typing lag, so they wait for the typing to settle.
+        self._ecm_display_timer.start()
+
+    def _refresh_ecm_display(self) -> None:
+        """Re-point the overlay and the report at the circuit now in the code
+        box. Cheaper than _refresh(): the masks and validity bookkeeping cannot
+        have changed, only which cached fit is on show."""
+        if self._pending is None:
             return
-        self._ecm_shown_cdc = data
-        self._refresh()
+        self._update_ecm_coverage()
+        self._pending["ecm_shown_cdc"] = self._ecm_shown_cdc
+        self._pending["ecm_curves"] = self._ecm_fit_curves(
+            self._pending["displayed_for"][3], self._ecm_shown_cdc
+        )
+        self._step_dirty.add(3)
+        self._render_active_step()
 
-    def _update_ecm_shown_combo(self) -> None:
-        """Repopulate the circuit picker from what has been fitted, and report
-        how much of the selection it covers. Signals stay blocked."""
-        fitted = sorted({cdc for cdc, _ in self._ecm_results})
-        if self._ecm_shown_cdc not in fitted:
-            self._ecm_shown_cdc = fitted[0] if fitted else None
+    # --- the editable circuit --------------------------------------------
 
-        self.ecm_step.shown_combo.blockSignals(True)
-        self.ecm_step.shown_combo.clear()
-        add_combo_items(self.ecm_step.shown_combo, [(cdc, cdc) for cdc in fitted])
-        if self._ecm_shown_cdc is not None:
-            self.ecm_step.shown_combo.setCurrentIndex(fitted.index(self._ecm_shown_cdc))
-        self.ecm_step.shown_combo.blockSignals(False)
+    def _rebuild_ecm_tree(self, text: str, ok: bool) -> None:
+        """Re-derive the canvas's tree from the code. An unparseable code leaves
+        the tree alone; _render_ecm_circuits reports it instead of drawing."""
+        from core.circuit_model import empty_root, from_cdc
 
-        has_fits = bool(fitted)
-        self.ecm_step.shown_label.setVisible(has_fits)
-        self.ecm_step.shown_combo.setVisible(has_fits)
-        self.ecm_step.shown_status_label.setVisible(has_fits)
-        if has_fits:
-            selected = self._selected_datasets()
-            covered = sum(
-                1 for ds in selected if (self._ecm_shown_cdc, ds.key) in self._ecm_results
+        if ok:
+            self._ecm_tree = from_cdc(text)
+        elif not text.strip():
+            self._ecm_tree = empty_root()
+
+    def _set_ecm_tree(self, tree) -> None:
+        """Push a tree out to the CDC field, which redraws everything else."""
+        from core.circuit_model import to_cdc
+
+        self._ecm_tree = tree
+        self._ecm_syncing = True
+        try:
+            self.ecm_step.cdc_edit.setText(to_cdc(tree, CIRCUIT_CDC_DECIMALS))
+        finally:
+            self._ecm_syncing = False
+
+    def _push_ecm_undo(self) -> None:
+        """Remember the current code before something replaces it."""
+        self._ecm_undo.append(self.ecm_step.cdc_edit.text())
+        del self._ecm_undo[:-MAX_CIRCUIT_UNDO]
+        self._ecm_redo.clear()
+        self._update_ecm_undo_buttons()
+
+    def _apply_ecm_edit(self, tree) -> None:
+        """Apply a canvas edit, remembering the code it replaced for undo."""
+        self._push_ecm_undo()
+        self._set_ecm_tree(tree)
+
+    def _edit_ecm_circuit(self, action, *args) -> None:
+        """Run one core.circuit_model action against the current tree."""
+        if self._ecm_tree is None:
+            return
+        try:
+            self._apply_ecm_edit(action(self._ecm_tree, *args))
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+
+    def _undo_ecm_edit(self) -> None:
+        if not self._ecm_undo:
+            return
+        self._ecm_redo.append(self.ecm_step.cdc_edit.text())
+        self.ecm_step.cdc_edit.setText(self._ecm_undo.pop())
+        self._update_ecm_undo_buttons()
+
+    def _redo_ecm_edit(self) -> None:
+        if not self._ecm_redo:
+            return
+        self._ecm_undo.append(self.ecm_step.cdc_edit.text())
+        self.ecm_step.cdc_edit.setText(self._ecm_redo.pop())
+        self._update_ecm_undo_buttons()
+
+    def _update_ecm_undo_buttons(self) -> None:
+        self.ecm_step.undo_button.setEnabled(bool(self._ecm_undo))
+        self.ecm_step.redo_button.setEnabled(bool(self._ecm_redo))
+
+    def _clear_ecm_circuit(self) -> None:
+        from core.circuit_model import empty_root
+
+        self._apply_ecm_edit(empty_root())
+
+    def _append_ecm_element(self, symbol: str) -> None:
+        from core.circuit_model import append_element
+
+        self._edit_ecm_circuit(append_element, symbol)
+
+    def _on_ecm_element_activated(self, node_id: int) -> None:
+        """Open the parameter editor over the component that was clicked."""
+        from core.circuit_model import ElementNode, find
+
+        node = find(self._ecm_tree, node_id) if self._ecm_tree else None
+        if not isinstance(node, ElementNode):
+            return
+
+        if self._ecm_editor is None:
+            from gui.element_editor import ElementEditor
+
+            self._ecm_editor = ElementEditor(self)
+            self._ecm_editor.type_changed.connect(self._on_ecm_type_changed)
+            self._ecm_editor.parameters_changed.connect(self._on_ecm_parameters_changed)
+
+        self._ecm_editor.show_node(
+            node,
+            self._ecm_element_name(node_id),
+            self._ecm_fitted_values(node_id),
+            self.ecm_step.canvas.anchor_for(node_id),
+        )
+
+    def _on_ecm_type_changed(self, node_id: int, symbol: str) -> None:
+        from core.circuit_model import replace_element
+
+        self._edit_ecm_circuit(replace_element, node_id, symbol)
+        # The new type has different parameters, so the open editor is stale.
+        self._on_ecm_element_activated(node_id)
+
+    def _on_ecm_parameters_changed(self, node_id: int, payload: dict) -> None:
+        from core.circuit_model import set_element
+
+        if self._ecm_tree is None:
+            return
+        try:
+            self._apply_ecm_edit(set_element(self._ecm_tree, node_id, **payload))
+        except ValueError as exc:
+            self.statusBar().showMessage(str(exc))
+
+    def _ecm_element_name(self, node_id: int) -> str:
+        """A component's display name (R_1, Q_ct), taken from the same circuit
+        the schematic is drawn from so the two agree."""
+        from core.circuit_model import ElementNode, to_circuit, walk
+
+        if self._ecm_tree is None:
+            return ""
+        order = [n for n in walk(self._ecm_tree) if isinstance(n, ElementNode)]
+        circuit = to_circuit(self._ecm_tree)
+        for node, element in zip(order, circuit.get_elements()):
+            if node.node_id == node_id:
+                return circuit.get_element_name(element)
+        return ""
+
+    def _ecm_fitted_values(self, node_id: int) -> Optional[dict]:
+        """This component's fitted values in the annotation on screen, if any."""
+        result = self._ecm_annotation()[0]
+        if result is None:
+            return None
+        fitted = result.parameters.get(self._ecm_element_name(node_id))
+        return {symbol: p.get_value() for symbol, p in fitted.items()} if fitted else None
+
+    def _ecm_annotation(self) -> Tuple[Optional[object], Optional[object]]:
+        """The (fit, sweep) whose values label the schematic, or (None, None)
+        when the canvas is showing starting values."""
+        from core.ecm import canonical_cdc
+
+        if self.ecm_step.values_mode != "Fitted" or self._ecm_tree is None:
+            return None, None
+        try:
+            canonical = canonical_cdc(self.ecm_step.cdc_edit.text())
+        except Exception:
+            return None, None
+
+        drawn = self._pending["displayed_for"][3] if self._pending else []
+        for ds in drawn:
+            result = self._ecm_results.get((canonical, ds.key))
+            if result is not None:
+                return result, ds
+        return None, None
+
+    def _render_ecm_circuits(self) -> None:
+        """Draw the working circuit on the canvas, labelled with either its own
+        starting values or the fit for the sweep on screen."""
+        from core.circuit_diagram import build_editor_drawing
+
+        canvas = self.ecm_step.canvas
+        canvas.set_theme_mode(self._theme_mode)
+
+        text = self.ecm_step.cdc_edit.text().strip()
+        if self._ecm_tree is None:
+            self._ecm_drawn = None
+            # First draw: ECMStep seeds the code with signals blocked, so the
+            # tree has not been built from it yet.
+            from core.ecm import validate_cdc
+
+            self._rebuild_ecm_tree(text, validate_cdc(text)[0])
+
+        if self._ecm_tree is None or not self._ecm_tree.children:
+            self._ecm_drawn = None
+            canvas.set_message(
+                self.ecm_step.cdc_status_label.text()
+                if text
+                else "Empty circuit — use 'Add element' below, or pick a preset."
             )
-            self.ecm_step.shown_status_label.setText(
-                f"{covered} of {len(selected)} selected sweep(s) fitted"
+            self.ecm_step.circuit_caption.setText("")
+            return
+
+        colors = diagram_colors(self._theme_mode)
+        result, ds = self._ecm_annotation()
+        # Every caller redraws unconditionally, and a keystroke can reach here
+        # twice; skip the schemdraw pass when nothing it draws has changed.
+        signature = (text, id(result), self._theme_mode)
+        if signature == self._ecm_drawn:
+            return
+        self._ecm_drawn = signature
+
+        try:
+            canvas.set_drawing(
+                build_editor_drawing(
+                    self._ecm_tree,
+                    parameters=result.parameters if result is not None else None,
+                    foreground=colors["wire"],
+                    accent=colors["value"] if result is not None else colors["muted"],
+                    show_errors=result is not None,
+                )
+            )
+        except Exception as exc:
+            canvas.set_message(f"Could not draw this circuit: {exc}")
+            return
+
+        self.ecm_step.circuit_caption.setText(self._ecm_caption(result, ds))
+
+    def _ecm_caption(self, result, ds) -> str:
+        from core.circuit_model import to_cdc
+
+        topology = to_cdc(self._ecm_tree, -1)
+        if result is not None:
+            return (
+                f"{topology} — fitted to {self._display_label(ds)}"
+                f"   χ² = {result.pseudo_chisqr:.4g}"
+            )
+        if self.ecm_step.values_mode == "Fitted":
+            return f"{topology} — no fit for this circuit on the sweep(s) shown"
+        return f"{topology} — starting values"
+
+    def _on_ecm_values_mode_changed(self, _checked: bool) -> None:
+        """Initial/Fitted only changes the labels on the canvas."""
+        self._render_ecm_circuits()
+
+    def _ecm_current_cdc(self) -> Optional[str]:
+        """The canonical form of the circuit in the code box, or None when it
+        does not parse. The ECM step displays this circuit and no other."""
+        from core.ecm import canonical_cdc
+
+        try:
+            return canonical_cdc(self.ecm_step.cdc_edit.text().strip())
+        except Exception:
+            return None
+
+    def _ecm_fit_curves(self, drawn: List, cdc: Optional[str]) -> dict:
+        """{key: (frequencies, impedances)} for `cdc`, per drawn sweep that has
+        a fit of it. A fit is interpolated onto its own denser grid, so the
+        plot builders need both."""
+        curves = {}
+        for ds in drawn:
+            result = self._ecm_results.get((cdc, ds.key))
+            if result is not None:
+                curves[ds.key] = (
+                    result.get_frequencies(num_per_decade=100),
+                    result.get_impedances(num_per_decade=100),
+                )
+        return curves
+
+    def _update_ecm_coverage(self) -> None:
+        """Point the step at the circuit being edited -- the only one it draws
+        -- and say how much of the selection has been fitted with it."""
+        self._ecm_shown_cdc = self._ecm_current_cdc()
+
+        label = self.ecm_step.shown_status_label
+        label.setVisible(bool(self._ecm_results))
+        if not self._ecm_results:
+            return
+
+        selected = self._selected_datasets()
+        covered = sum(
+            1 for ds in selected if (self._ecm_shown_cdc, ds.key) in self._ecm_results
+        )
+        if covered:
+            label.setText(
+                f"{covered} of {len(selected)} selected sweep(s) fitted with "
+                f"this circuit."
+            )
+        else:
+            # Says so explicitly, because the fits for other circuits are still
+            # cached and it should not look like they were thrown away.
+            label.setText(
+                "Not fitted with this circuit yet. Earlier circuits' fits are "
+                "kept — put one back in the code box to see it again."
             )
 
     def _ecm_settings(self) -> dict:
@@ -1454,8 +1920,8 @@ class MainWindow(QMainWindow):
     def _on_ecm_finished(self) -> None:
         self._ecm_worker = None
         self._set_controls_enabled(True)
-        # Show what was just fitted.
-        self._ecm_shown_cdc = self._pending_ecm["cdc"]
+        # No need to point the step at what was just fitted: _refresh() below
+        # re-derives that from the code box, which still holds it.
         failed = len(self._ecm_worker_errors)
         self.statusBar().showMessage(
             f"Circuit fitting finished ({failed} failed)." if failed
@@ -1469,57 +1935,13 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "ECM errors", f"Some sweeps failed:\n{details}")
         self._refresh()
 
-    def _render_ecm_circuits(self, fits: List[Tuple[str, object]]) -> None:
-        """Draw the schematics in the ECM step's lower pane: one per (sweep,
-        fitted circuit) in `fits`, annotated with that fit's values."""
-        from core.circuit_diagram import build_fit_diagram, build_preview_diagram
-
-        colors = diagram_colors(self._theme_mode)
-        if not fits:
-            cdc = self.ecm_step.cdc_edit.text().strip()
-            try:
-                svg = build_preview_diagram(
-                    cdc, foreground=colors["wire"], accent=colors["muted"]
-                )
-            except Exception:
-                # A half-typed code is normal, not an error worth a dialog --
-                # the panel's status label already reports the problem.
-                self.ecm_step.circuit_pane.set_message(
-                    "Enter a valid circuit description code on the left to "
-                    "preview the circuit, then click 'Fit circuit'."
-                )
-                return
-            self.ecm_step.circuit_pane.set_diagrams(
-                [(f"{cdc} — not fitted yet (initial values)", svg)]
-            )
-            return
-
-        # Capped, not paged: every fit is listed in full in the report below.
-        shown = fits[:MAX_CIRCUIT_DIAGRAMS]
-        self.ecm_step.circuit_pane.set_diagrams(
-            [
-                (
-                    f"{label} — {result.circuit.to_string()}"
-                    f"   χ² = {result.pseudo_chisqr:.4g}",
-                    build_fit_diagram(
-                        result, foreground=colors["wire"], accent=colors["value"]
-                    ),
-                )
-                for label, result in shown
-            ]
-        )
-        if len(fits) > len(shown):
-            self.ecm_step.circuit_pane.add_note(
-                f"… and {len(fits) - len(shown)} more fit(s), listed in the "
-                f"report below. Narrow the sweep selection to draw them."
-            )
-
     def _force_replot_ecm(self) -> None:
         """Rebuild the ECM step from current state, bypassing the dirty check
         -- the plot-area 'Replot' button, mirroring _force_replot_spectrum."""
         if self._pending is None:
             return
         self._step_dirty.add(3)
+        self._ecm_drawn = None
         self._render_active_step()
 
     # ------------------------------------------------------------- refresh
@@ -1531,21 +1953,20 @@ class MainWindow(QMainWindow):
             return
 
         # Only reachable once a file has been loaded, so these are warm.
-        from core.filtering import clear_mask, mask_inductive_points
+        from core.filtering import clear_mask, mask_inductive_points, mask_points
         from core.validation import mask_residual_outliers
 
         selected = self._selected_datasets()
         if not selected:
             self.warning_label.setText("Select at least one sweep to plot.")
             self.warning_label.show()
-            self.ecm_step.circuit_pane.clear()
             self._show_empty_state()
             self.data_viz_step.spectrum_pane.set_message(
                 "No sweep selected — tick one in Files and sets below."
             )
-            # This branch returns before the repopulation below, so refresh
-            # the picker's "N of M fitted" count here.
-            self._update_ecm_shown_combo()
+            # This branch returns before the recompute below, so refresh the
+            # "N of M fitted" count here.
+            self._update_ecm_coverage()
             self._pending = None
             self._step_dirty.clear()
             # _residuals_armed survives: an empty selection is a transient
@@ -1554,7 +1975,7 @@ class MainWindow(QMainWindow):
             return
 
         method = self._validation_method
-        threshold = self.validation_step.threshold_spin.value()
+        threshold = self.validation_step.reject_threshold
 
         for ds in selected:
             if self.validation_step.inductive_check.isChecked():
@@ -1569,6 +1990,10 @@ class MainWindow(QMainWindow):
         for ds in selected:
             result = self._validation_results.get((method, ds.key))
             if result is not None:
+                # Replayed before the threshold pass, not derived by it: an
+                # iterative prune's removals are the point set the result was
+                # fitted on, and re-deriving them would mean re-running it.
+                mask_points(ds, self._pruned_points(method, ds.key))
                 try:
                     mask_residual_outliers(ds, result, threshold)
                 except ValueError:
@@ -1606,35 +2031,24 @@ class MainWindow(QMainWindow):
             if ds.key in self._drt_results
         ]
         # Must run before _ecm_shown_cdc is read below: it settles which
-        # circuit is displayed if the previous choice was removed.
-        self._update_ecm_shown_combo()
+        # circuit is displayed, from the code box.
+        self._update_ecm_coverage()
         shown_cdc = self._ecm_shown_cdc
-        ecm_selected = [
-            ds for ds in displayed_for[3] if (shown_cdc, ds.key) in self._ecm_results
-        ]
-        # (frequencies, impedances) per sweep -- a fit is interpolated onto its
-        # own denser grid, so plot builders need both.
-        ecm_curves = {
-            ds.key: (
-                self._ecm_results[(shown_cdc, ds.key)].get_frequencies(num_per_decade=100),
-                self._ecm_results[(shown_cdc, ds.key)].get_impedances(num_per_decade=100),
-            )
-            for ds in ecm_selected
-        }
-        drt_peaks_selected = [
-            (self._display_label(ds), self._drt_peaks[ds.key])
-            for ds in displayed_for[2]
-            if ds.key in self._drt_peaks
-        ]
-
+        ecm_curves = self._ecm_fit_curves(displayed_for[3], shown_cdc)
         self._pending = dict(
             selected=selected,
             displayed_for=displayed_for,
             method=method,
             threshold=threshold,
+            # Second residual line, drawn only where it means something: in
+            # basic mode there is one limit, and it is `threshold`.
+            soft_threshold=(
+                self.validation_step.soft_limit_spin.value()
+                if self.validation_step.mode == "Advanced"
+                else None
+            ),
             validated_selected=validated_selected,
             drt_selected=drt_selected,
-            drt_peaks_selected=drt_peaks_selected,
             ecm_curves=ecm_curves,
             ecm_shown_cdc=shown_cdc,
         )
@@ -1719,17 +2133,34 @@ class MainWindow(QMainWindow):
     def _render_peak_report(self, drawn: List) -> None:
         """The per-peak table for whatever is on screen, shown beside the DRT
         controls rather than in a pane of its own."""
-        peak_lines = []
+        table = self.drt_step.peaks_table
+        # Columns come from the upstream dataframe, so they follow whatever the
+        # peak fitter reports. A "Set" column is prepended only when it earns
+        # its width -- with one sweep on screen every row would repeat it.
+        rows: List[Tuple[str, List[str]]] = []
+        columns: List[str] = []
         for ds in drawn:
             peaks = self._drt_peaks.get(ds.key)
             if peaks is None:
                 continue
-            peak_lines.append(
-                f"=== {self._display_label(ds)} ({peaks.get_num_peaks()} peak(s)) ==="
-            )
-            peak_lines.append(peaks.to_peaks_dataframe().to_string(index=False))
-            peak_lines.append("")
-        self.drt_step.peaks_text.setPlainText("\n".join(peak_lines))
+            frame = peaks.to_peaks_dataframe()
+            if not columns:
+                columns = [str(c) for c in frame.columns]
+            label = self._display_label(ds)
+            for values in frame.itertuples(index=False):
+                rows.append((label, [f"{v:.4g}" if isinstance(v, float) else str(v)
+                                     for v in values]))
+
+        multi = len({label for label, _ in rows}) > 1
+        headers = (["Set"] if multi else []) + columns
+        table.clear()
+        table.setColumnCount(len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setRowCount(len(rows))
+        for r, (label, values) in enumerate(rows):
+            for c, text in enumerate((([label] if multi else []) + values)):
+                table.setItem(r, c, QTableWidgetItem(text))
+        table.resizeColumnsToContents()
 
     def _render_sweep_details(self, selected: List) -> None:
         """An inventory of the working set -- everything selected, not just
@@ -1750,14 +2181,6 @@ class MainWindow(QMainWindow):
             lines.append(f"{self._display_label(ds)} — {ds.num_points} points{note}")
         self.data_viz_step.details_text.setPlainText("\n".join(lines))
 
-    def _on_drt_top_view_changed(self, _checked: bool) -> None:
-        """Swap the DRT step's upper pane between the measured spectrum and the
-        deconvolved peaks; skips _refresh()."""
-        if self._pending is None:
-            return
-        self._step_dirty.add(2)
-        self._render_active_step()
-
     def _force_replot_drt(self) -> None:
         """Rebuild the DRT step, bypassing the dirty check -- the plot-area
         'Replot' button."""
@@ -1777,7 +2200,6 @@ class MainWindow(QMainWindow):
 
         from core.plotting import (
             build_bode_plot,
-            build_drt_peaks_plot,
             build_drt_plot,
             build_nyquist_plot,
             build_residuals_plot,
@@ -1809,21 +2231,19 @@ class MainWindow(QMainWindow):
                         result,
                         title=f"{p['method']} residuals — {self._display_label(ds)}",
                         threshold=p["threshold"],
+                        soft_threshold=p["soft_threshold"],
                     )
                 )
             self.validation_step.residuals_pane.set_widgets(residual_widgets)
             self._update_residuals_header(len(shown), len(validated))
 
         elif index == 2:
-            if self.drt_step.top_view == "Peaks":
-                if p["drt_peaks_selected"]:
-                    self.drt_step.top_pane.set_widget(
-                        build_drt_peaks_plot(p["drt_peaks_selected"])
-                    )
-                else:
-                    self.drt_step.top_pane.clear()
-            else:
-                self._draw_spectrum(self.drt_step.top_pane, drawn, show_removed=True)
+            # Through _drt_inputs, so this step's own inductive-tail filter
+            # shows here as removed points without the other steps' plots (or
+            # their masks) moving.
+            self._draw_spectrum(
+                self.drt_step.top_pane, self._drt_inputs(drawn), show_removed=True
+            )
 
             if p["drt_selected"]:
                 self.drt_step.drt_pane.set_widget(build_drt_plot(p["drt_selected"]))
@@ -1852,25 +2272,18 @@ class MainWindow(QMainWindow):
                 # the step still says which sweep "Fit circuit" would act on.
                 self._draw_spectrum(self.ecm_step.spectrum_pane, drawn, show_removed=False)
 
-            # Every circuit fitted to each sweep, best chi-squared first.
+            # The circuit in the code box only, one entry per drawn sweep. The
+            # other circuits' fits stay cached; listing them all here is what
+            # made this unreadable after a dozen guesses.
             from core.ecm import format_fit_report
 
             report_lines = []
-            fits_by_sweep = []
             for ds in drawn:
-                fits = sorted(
-                    (
-                        (result.pseudo_chisqr, cdc, result)
-                        for (cdc, key), result in self._ecm_results.items()
-                        if key == ds.key
-                    ),
-                    key=lambda item: item[0],
-                )
-                for _, _, result in fits:
+                result = self._ecm_results.get((p["ecm_shown_cdc"], ds.key))
+                if result is not None:
                     report_lines.append(format_fit_report(result, self._display_label(ds)))
-                    fits_by_sweep.append((self._display_label(ds), result))
             self.ecm_step.params_text.setPlainText("\n".join(report_lines))
-            self._render_ecm_circuits(fits_by_sweep)
+            self._render_ecm_circuits()
 
         # Remember the framing so the next step opens on the same view.
         pane = self._spectrum_pane_for(index)

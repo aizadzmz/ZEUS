@@ -34,7 +34,11 @@ def _is_picklable(obj) -> bool:
 
 
 class ValidationWorker(QThread):
-    """Runs a validation method (KK or Z-HIT) over several datasets."""
+    """Runs a validation method (KK or Z-HIT) over several datasets.
+
+    The runner decides what a "result" is: a plain ValidationResult for a
+    single pass, or a core.validation.PruneOutcome when the runner is an
+    iterative prune, which is many passes and reports what it removed."""
 
     result_ready = Signal(str, str, object)  # method name, dataset key, result
     error = Signal(str, str)                 # dataset key, message

@@ -1,16 +1,15 @@
 [project]
 name = "eis-batch-analysis"
-version = "0.1.0"
+version = "0.3.0"
 description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "cvxopt>=1.3.3",
     "numpy>=2.5.1",
     "pyimpspec>=5.1.3",
-    "pyprobe-data>=2.6.0",
     "pyqtdarktheme-fork>=2.3.6",
     "pyqtgraph>=0.14.0",
-    "pyside6>=6.11.1",
+    "pyside6-essentials>=6.11.1",
     # Already a pyimpspec dependency, but core.circuit_diagram imports it
     # directly to draw the annotated ECM schematics.
     "schemdraw>=0.22",
@@ -27,5 +26,6 @@ packages = ["core"]
 dev = [
     "batterydf>=0.1.0",
     "hatchling>=1.31.0",
+    "pyinstaller>=6.21.0",
     "pytest>=9.1.1",
 ]

@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLayout,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -85,6 +85,24 @@ class StepPage(QWidget):
         root.addWidget(self._page_splitter)
 
         self._wanted_width = DEFAULT_SETTINGS_WIDTH
+        # Content-side widgets that grey out with the settings column; see
+        # lock_with_settings.
+        self._locked_extras: List[QWidget] = []
+
+    # Interaction lock
+
+    def lock_with_settings(self, widget: QWidget) -> None:
+        """Register a content-column widget that greys out alongside the
+        settings, i.e. everything on the page that is not a plot."""
+        self._locked_extras.append(widget)
+
+    def set_controls_locked(self, locked: bool) -> None:
+        """Leave the plots live and disable everything else. Disabling the
+        containers, not their children, so unlocking restores whatever each
+        control's own state was (a Run button greyed out mid-run stays so)."""
+        self.settings_scroll.setEnabled(not locked)
+        for widget in self._locked_extras:
+            widget.setEnabled(not locked)
 
     # Panel width
 
@@ -121,18 +139,11 @@ class StepPage(QWidget):
 
     # Display mode
 
-    def add_display_mode_box(
-        self, title: str = "Plot view", tooltip: str = ""
-    ) -> QWidget:
-        """Add this step's own one-at-a-time/combined toggle. Each step keeps
-        an independent one."""
-        container = QWidget()
-        col = QVBoxLayout(container)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(style.GROUP_SPACING)
-        col.addWidget(section_label(title))
-
-        segmented = SegmentedControl(["One at a time", "Combined"])
+    def display_mode_control(self, tooltip: str = "") -> SegmentedControl:
+        """This step's singular/multiple toggle, uncarded -- for a step that
+        wants it as one row of a card it shares with other plot settings.
+        add_display_mode_box() is the same control in a card of its own."""
+        segmented = SegmentedControl(["Singular", "Multiple"])
         if tooltip:
             segmented.setToolTip(tooltip)
         # Named *_radio though they are QToolButtons: same QAbstractButton API,
@@ -143,8 +154,15 @@ class StepPage(QWidget):
         )
         self.combined_radio = segmented.button(1)
         self.combined_radio.setToolTip("Draw every selected sweep on one figure.")
-        col.addWidget(segmented)
+        return segmented
 
+    def add_display_mode_box(
+        self, title: str = "Plot view", tooltip: str = ""
+    ) -> QWidget:
+        """Add this step's own singular/multiple toggle. Each step keeps an
+        independent one."""
+        container, col = group_box(title)
+        col.addWidget(self.display_mode_control(tooltip))
         self.add_settings(container)
         return container
 
@@ -175,25 +193,54 @@ class StepPage(QWidget):
 # ------------------------------------------------------------ layout helpers
 
 
-def group_box(title: str, tooltip: str = "") -> Tuple[QGroupBox, QVBoxLayout]:
-    """A group box whose inner layout already carries the spacing tokens."""
-    box = QGroupBox(title)
+def _section(title: str, tooltip: str) -> Tuple[QWidget, QVBoxLayout]:
+    """A settings card: accent title over a rule, then the caller's content.
+    Replaces QGroupBox, whose title-cut-into-the-border look is the strongest
+    remaining pyDRTtools tell in this column."""
+    card = QWidget()
+    card.setObjectName("settingsSection")
+    # Never taller than its content. A card holding an Expanding child that is
+    # also height-capped (a list, a read-only text pane) otherwise claims the
+    # column's spare height, and since the capped child cannot use it the space
+    # lands on the title label, which grows and centres its text.
+    # end_settings()'s stretch is what the surplus is for.
+    card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+    outer = QVBoxLayout(card)
+    outer.setContentsMargins(*style.GROUP_MARGINS)
+    outer.setSpacing(style.GROUP_SPACING)
+
+    if title:
+        label = QLabel(title)
+        label.setObjectName("sectionTitle")
+        label.setFont(style.section_title_font())
+        outer.addWidget(label)
     if tooltip:
-        box.setToolTip(tooltip)
+        card.setToolTip(tooltip)
+    return card, outer
+
+
+def quiet_group() -> Tuple[QWidget, QVBoxLayout]:
+    """Un-carded container for exports, which sit outside the settings cards
+    rather than claiming a titled section of their own."""
+    box = QWidget()
     layout = QVBoxLayout(box)
-    layout.setContentsMargins(*style.GROUP_MARGINS)
+    layout.setContentsMargins(0, 0, 0, 0)
     layout.setSpacing(style.GROUP_SPACING)
     return box, layout
 
 
-def group_form(title: str, tooltip: str = "") -> Tuple[QGroupBox, QFormLayout]:
-    """A group box laid out as a two-column form: label beside control, which
-    halves the height of a settings panel."""
-    box = QGroupBox(title)
-    if tooltip:
-        box.setToolTip(tooltip)
-    form = QFormLayout(box)
-    form.setContentsMargins(*style.GROUP_MARGINS)
+def group_box(title: str, tooltip: str = "") -> Tuple[QWidget, QVBoxLayout]:
+    """A settings card whose inner layout already carries the spacing tokens."""
+    return _section(title, tooltip)
+
+
+def group_form(title: str, tooltip: str = "") -> Tuple[QWidget, QFormLayout]:
+    """A settings card laid out as a two-column form: label beside control,
+    which halves the height of a settings panel."""
+    box, outer = _section(title, tooltip)
+    form = QFormLayout()
+    outer.addLayout(form)
+    form.setContentsMargins(0, 0, 0, 0)
     form.setHorizontalSpacing(style.FORM_H_SPACING)
     form.setVerticalSpacing(style.FORM_V_SPACING)
     form.setRowWrapPolicy(QFormLayout.WrapLongRows)
@@ -203,6 +250,31 @@ def group_form(title: str, tooltip: str = "") -> Tuple[QGroupBox, QFormLayout]:
     form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
     return box, form
+
+
+def set_row_enabled(form: QFormLayout, field: QWidget, enabled: bool) -> None:
+    """Grey out a form row, label included -- disabling the field alone leaves
+    its label at full contrast, which reads as an enabled control."""
+    field.setEnabled(enabled)
+    label = form.labelForField(field)
+    if label is not None:
+        label.setEnabled(enabled)
+
+
+def set_row_visible(form: QFormLayout, field: QWidget, visible: bool) -> None:
+    """Show or hide a form row, label included. For settings a mode makes
+    meaningless rather than merely inapplicable -- greying out (set_row_enabled)
+    says 'not right now', hiding says 'not in this mode'."""
+    # setRowVisible, not setVisible on the widgets: hiding them individually
+    # leaves the row's slot in the grid and so a gap where it used to be.
+    form.setRowVisible(field, visible)
+
+
+def set_row_label(form: QFormLayout, field: QWidget, text: str) -> None:
+    """Retitle a form row whose meaning depends on another setting."""
+    label = form.labelForField(field)
+    if label is not None:
+        label.setText(text)
 
 
 def add_combo_items(combo: QComboBox, pairs) -> None:

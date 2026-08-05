@@ -325,13 +325,23 @@ def ui_state_to_dict(
     validation_method: str,
     inductive_filter: bool,
     residual_threshold: float,
+    validation_mode: str = "Basic",
+    soft_limit: Optional[float] = None,
+    hard_limit: Optional[float] = None,
+    max_removed: Optional[int] = None,
 ) -> dict:
+    # The advanced mode's fields are optional: a session saved before it
+    # existed has none, and load falls back to the widgets' own defaults.
     return {
         "manual_masked": {key: sorted(idxs) for key, idxs in manual_masked.items()},
         "manual_kept": {key: sorted(idxs) for key, idxs in manual_kept.items()},
         "validation_method": validation_method,
         "inductive_filter": inductive_filter,
         "residual_threshold": residual_threshold,
+        "validation_mode": validation_mode,
+        "soft_limit": soft_limit,
+        "hard_limit": hard_limit,
+        "max_removed": max_removed,
     }
 
 
@@ -352,6 +362,10 @@ def ui_state_from_dict(d: dict, key_by_label: Optional[Dict[str, str]] = None) -
         "validation_method": d.get("validation_method"),
         "inductive_filter": d.get("inductive_filter", False),
         "residual_threshold": d.get("residual_threshold"),
+        "validation_mode": d.get("validation_mode", "Basic"),
+        "soft_limit": d.get("soft_limit"),
+        "hard_limit": d.get("hard_limit"),
+        "max_removed": d.get("max_removed"),
     }
 
 

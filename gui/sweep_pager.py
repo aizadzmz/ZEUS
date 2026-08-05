@@ -30,7 +30,7 @@ class SweepPager(QWidget):
         self.set_label.setToolTip("Which sweep within that file.")
         row.addWidget(QLabel("File"))
         row.addWidget(self.file_label)
-        row.addSpacing(12)
+        row.addSpacing(style.PAGER_FIELD_GAP)
         row.addWidget(QLabel("Set"))
         row.addWidget(self.set_label)
         row.addStretch()

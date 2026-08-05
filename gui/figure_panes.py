@@ -4,9 +4,7 @@ layouts."""
 from typing import List, Optional, Tuple
 
 import pyqtgraph as pg
-from PySide6.QtCore import QByteArray, QPointF, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QPainter
-from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QLabel,
     QScrollArea,
@@ -17,7 +15,6 @@ from PySide6.QtWidgets import (
 )
 
 from core.plotting import point_tip
-from gui import style
 
 # The overlay card's look lives in gui.style's QSS block, keyed off the
 # objectName set in _build_overlay.
@@ -41,10 +38,15 @@ class PgFigurePane(QWidget):
     # decides what that means. Keyed by ds.key so a click resolves correctly
     # when several files share "Set NN" labels.
     point_mask_toggled = Signal(str, int)
+    # The overlay's Eraser button was clicked. As with point_mask_toggled the
+    # pane only reports it: the owner arms every eraser-capable pane together
+    # and locks the rest of the window.
+    eraser_toggled = Signal(bool)
 
     def __init__(
         self,
         with_overlay_actions: bool = True,
+        with_eraser: bool = False,
         parent: Optional[QWidget] = None,
     ):
         super().__init__(parent)
@@ -59,10 +61,11 @@ class PgFigurePane(QWidget):
         # every replot, including the one each erase triggers, which would
         # otherwise turn the mode off after a single click.
         self._eraser = False
+        self._eraser_button: Optional[QToolButton] = None
 
         self._overlay: Optional[QWidget] = None
         if with_overlay_actions:
-            self._build_overlay()
+            self._build_overlay(with_eraser)
 
         # The last view (pan/zoom or Auto-Scale), so an unrelated replot --
         # running validation, DRT, etc. -- does not snap back to the default
@@ -91,7 +94,7 @@ class PgFigurePane(QWidget):
         self._hover_timer.setInterval(HOVER_DELAY_MS)
         self._hover_timer.timeout.connect(self._show_pending_hover)
 
-    def _build_overlay(self) -> None:
+    def _build_overlay(self, with_eraser: bool) -> None:
         overlay = QWidget(self)
         # Scopes the stylesheet's card and button rules to this overlay --
         # unscoped they would restyle every QToolButton in the app.
@@ -99,6 +102,26 @@ class PgFigurePane(QWidget):
         col = QVBoxLayout(overlay)
         col.setContentsMargins(4, 4, 4, 4)
         col.setSpacing(2)
+
+        if with_eraser:
+            # On the plot rather than in the settings column: the eraser locks
+            # that column while it is on, so this has to be the way back out.
+            self._eraser_button = QToolButton(overlay)
+            self._eraser_button.setText("Eraser")
+            self._eraser_button.setCheckable(True)
+            self._eraser_button.setToolTip(
+                "Click a point on this plot to remove it, or a removed (grey ×) "
+                "point to restore it. On the Bode plot the grey × markers are on "
+                "the |Z| series. Manual edits override the inductive filter and "
+                "the outlier threshold, and are cleared when a different file "
+                "is opened.\n\n"
+                "While the eraser is on, the rest of the window is locked — "
+                "switch it off to carry on.\n\n"
+                "Hiding the 'Removed' series via its legend entry also stops "
+                "those points responding to clicks."
+            )
+            self._eraser_button.toggled.connect(self.eraser_toggled)
+            col.addWidget(self._eraser_button)
 
         replot_button = QToolButton(overlay)
         replot_button.setText("Replot")
@@ -118,6 +141,11 @@ class PgFigurePane(QWidget):
         # Signalled, not handled here: this pane owns no dialogs.
         save_button.clicked.connect(self.save_image_requested)
         col.addWidget(save_button)
+
+        # Stretched to the widest label rather than each sizing to its own
+        # text, which left the stack with a ragged right edge.
+        for button in overlay.findChildren(QToolButton):
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
         overlay.adjustSize()
         self._overlay = overlay
@@ -204,6 +232,12 @@ class PgFigurePane(QWidget):
         """Turn click-to-mask/unmask on or off. While on, clicking a point
         reports it via point_mask_toggled instead of pinning a box."""
         self._eraser = enabled
+        if self._eraser_button is not None:
+            # Blocked: one click arms every pane, and the echo back into this
+            # pane's own button would toggle the mode straight off again.
+            self._eraser_button.blockSignals(True)
+            self._eraser_button.setChecked(enabled)
+            self._eraser_button.blockSignals(False)
         if enabled:
             self._pinned = False
             self._hide_tooltip()
@@ -354,119 +388,6 @@ class PgFigurePane(QWidget):
             self._layout.removeWidget(self._widget)
             self._widget.deleteLater()
             self._widget = None
-
-
-# How far past its natural size a schematic may be scaled up. Vector art stays
-# crisp, but a two-element circuit across a wide window reads as a poster.
-MAX_DIAGRAM_SCALE = 1.8
-
-
-class SvgFigure(QWidget):
-    """One SVG drawn at a given width, keeping its aspect ratio."""
-
-    def __init__(self, svg: bytes, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self._renderer = QSvgRenderer(QByteArray(svg))
-        natural = self._renderer.defaultSize()
-        # 1x1, not 0x0, so the aspect divisions below stay safe when the SVG
-        # does not parse.
-        self._natural = natural if natural.width() > 0 and natural.height() > 0 else QSize(1, 1)
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.set_display_width(self._natural.width())
-
-    def set_display_width(self, width: int) -> None:
-        """Draw at `width` px (clamped to the legible range) and take exactly
-        the height that implies."""
-        self._drawn_width = max(
-            self._natural.width() // 2,
-            min(int(width), int(self._natural.width() * MAX_DIAGRAM_SCALE)),
-        )
-        self.setFixedHeight(
-            round(self._drawn_width * self._natural.height() / self._natural.width())
-        )
-        self.update()
-
-    def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        # Centered, so a narrow circuit does not sit off to one side of its
-        # caption in a wide pane.
-        painter.translate(max(0, (self.width() - self._drawn_width) / 2), 0)
-        self._renderer.render(painter, QRectF(0, 0, self._drawn_width, self.height()))
-        painter.end()
-
-
-class CircuitDiagramPane(QScrollArea):
-    """A scrollable column of captioned circuit schematics for the ECM
-    Parameters tab; set_message covers the states with no diagram."""
-
-    MARGIN = 12
-
-    def __init__(self, parent: Optional[QWidget] = None):
-        super().__init__(parent)
-        self.setWidgetResizable(True)
-        self._container = QWidget()
-        self._layout = QVBoxLayout(self._container)
-        self._layout.setContentsMargins(self.MARGIN, 8, self.MARGIN, 8)
-        self._layout.setSpacing(style.LIST_SPACING)
-        self._layout.addStretch()
-        self.setWidget(self._container)
-        self._items: List[QWidget] = []
-        self._figures: List[SvgFigure] = []
-
-    def set_diagrams(self, diagrams: List[Tuple[str, bytes]]) -> None:
-        """Replace the contents with (caption, svg) pairs, in order."""
-        self.clear()
-        for caption, svg in diagrams:
-            label = QLabel(caption)
-            label.setObjectName("diagramCaption")
-            label.setWordWrap(True)
-            self._add(label)
-            figure = SvgFigure(svg)
-            self._figures.append(figure)
-            self._add(figure)
-        self._resize_figures()
-
-    def set_message(self, text: str) -> None:
-        self.clear()
-        label = QLabel(text)
-        label.setWordWrap(True)
-        label.setAlignment(Qt.AlignCenter)
-        label.setObjectName("figureMessage")
-        self._add(label)
-
-    def add_note(self, text: str) -> None:
-        """Append a line of plain text under the diagrams already set, for
-        saying what was left undrawn."""
-        label = QLabel(text)
-        label.setWordWrap(True)
-        label.setObjectName("figureNote")
-        self._add(label)
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._resize_figures()
-
-    def _resize_figures(self) -> None:
-        width = self.viewport().width() - 2 * self.MARGIN
-        for figure in self._figures:
-            figure.set_display_width(width)
-
-    def _add(self, widget: QWidget) -> None:
-        # Above the trailing stretch, so a short column stays pinned to the top.
-        self._layout.insertWidget(self._layout.count() - 1, widget)
-        self._items.append(widget)
-
-    def clear(self) -> None:
-        for widget in self._items:
-            self._layout.removeWidget(widget)
-            # Unparent as well: deleteLater only schedules destruction, and
-            # until then a widget merely out of the layout keeps its parent and
-            # goes on painting itself under the replacements.
-            widget.setParent(None)
-            widget.deleteLater()
-        self._items = []
-        self._figures = []
 
 
 class PgFigureListPane(QScrollArea):

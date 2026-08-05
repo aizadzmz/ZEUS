@@ -4,7 +4,24 @@ import multiprocessing
 import sys
 from pathlib import Path
 
-ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.ico"
+def _assets_dir() -> Path:
+    """gui/assets, in a checkout and inside a PyInstaller bundle alike.
+
+    This file is the frozen app's entry script, so it runs as __main__ with
+    __file__ at the bundle root rather than under gui/ -- the plain
+    __file__-relative path resolves one directory too high and every asset
+    below silently goes missing.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys._MEIPASS) / "gui" / "assets"
+    return Path(__file__).resolve().parent / "assets"
+
+
+ASSETS_DIR = _assets_dir()
+ICON_PATH = ASSETS_DIR / "icon.ico"
+# The splash uses the full logo rather than the icon: the icon is the wordmark
+# alone, padded square for the taskbar, so it reads small on a 420x260 card.
+SPLASH_LOGO_PATH = ASSETS_DIR / "splash.png"
 
 # gui.style is Qt-light (no pyqtgraph, no qdarktheme), so the splash can share
 # the real accent color without duplicating the literal.
@@ -114,29 +131,44 @@ def _install_hang_watchdog(log_file, seconds=12):
 
 
 def _splash_pixmap():
-    """Build the splash background: app icon + name on a dark card. Drawn in
-    code rather than shipped as a PNG, so it always matches ICON_PATH."""
+    """Build the splash background: logo + app name on a dark card. Composed in
+    code rather than shipped pre-rendered, so the text and progress bar stay in
+    step with the logo asset and the accent color."""
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
 
     width, height = 420, 260
+    # Everything below the logo: label band, then the progress bar's strip.
+    text_top, logo_top = 172, 24
+
     pixmap = QPixmap(width, height)
     pixmap.fill(QColor("#1e2228"))
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
 
-    icon = QPixmap(str(ICON_PATH))
-    if not icon.isNull():
-        icon = icon.scaled(
-            96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation
+    logo = QPixmap(str(SPLASH_LOGO_PATH))
+    if logo.isNull():  # missing asset should not cost us the splash
+        logo = QPixmap(str(ICON_PATH))
+    if not logo.isNull():
+        # Bounded on both axes so a logo of any aspect ratio stays inside the
+        # band between the top margin and the label.
+        logo = logo.scaled(
+            260,
+            text_top - logo_top - 12,
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
         )
-        painter.drawPixmap((width - icon.width()) // 2, 36, icon)
+        painter.drawPixmap(
+            (width - logo.width()) // 2,
+            logo_top + (text_top - logo_top - 12 - logo.height()) // 2,
+            logo,
+        )
 
     painter.setPen(QColor("#e3e6ea"))
     painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
     painter.drawText(
-        pixmap.rect().adjusted(0, 150, 0, 0), Qt.AlignHCenter, "EIS Batch Analysis"
+        pixmap.rect().adjusted(0, text_top, 0, 0), Qt.AlignHCenter, "ZEUS"
     )
     painter.end()
 

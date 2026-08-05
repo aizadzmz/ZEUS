@@ -22,13 +22,15 @@ if TYPE_CHECKING:
 ORIGIN_COLOR = "#CC9D33"
 ORIGIN_WIDTH = 2.0
 
-# The app's color cycle (matplotlib's tab10).
+# The app's color cycle (matplotlib's tab10), with the leading blue swapped for
+# the accent so a single-sweep plot is on-brand. The rest stay categorical --
+# distinguishing sweeps beats matching the palette.
 TAB10 = (
-    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#2b3f9e", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
 )
 
-_REMOVED_COLOR = "#999999"
+_REMOVED_COLOR = "#708090"  # slate: reads as discarded against every series
 
 # Which Bode series belongs to which axis. Sits under the title rather than in
 # the legend, which is per-sweep.
@@ -67,6 +69,22 @@ def _engineering_exponent(max_abs: float) -> int:
     if max_abs < 1000 or not math.isfinite(max_abs) or max_abs <= 0:
         return 0
     return (math.floor(math.log10(max_abs)) // 3) * 3
+
+
+def _close_plot_box(plot_item) -> None:
+    """Draw the top and right borders, so a plot reads as a closed box rather
+    than an L of two axes.
+
+    The extra axes carry no ticks or label -- they exist only for their line.
+    The margins give that line somewhere to sit: a bare AxisItem has ~0
+    height, so without them it lands hard against the widget edge and clips.
+    """
+    plot_item.layout.setContentsMargins(1, 6, 12, 12)  # left, top, right, bottom
+    for side in ("top", "right"):
+        plot_item.showAxis(side)
+        border_axis = plot_item.getAxis(side)
+        border_axis.setStyle(showValues=False, tickLength=0)
+        border_axis.setLabel(None)
 
 
 def _axis_label(base: str, exponent: int) -> str:
@@ -395,23 +413,11 @@ def build_nyquist_plot(
 
     widget = pg.PlotWidget(title=title, axisItems={"bottom": bottom_axis, "left": left_axis})
     plot_item = widget.getPlotItem()
-    # Padding so nothing lands exactly on the boundary: AxisItem draws its
-    # label a few px past its laid-out row, and the bare top/right border axes
-    # below have ~0 height, putting their line right at the edge.
-    plot_item.layout.setContentsMargins(1, 6, 12, 12)  # left, top, right, bottom
     plot_item.setAspectLocked(True)
     plot_item.showGrid(x=True, y=True, alpha=0.3)
     plot_item.setLabel("bottom", _axis_label("Z'", exponent))
     plot_item.setLabel("left", _axis_label("-Z''", exponent))
-
-    # Top/right shown bare (no ticks or labels) purely to close the plot box,
-    # matching the bottom/left border.
-    plot_item.showAxis("top")
-    plot_item.showAxis("right")
-    for side in ("top", "right"):
-        border_axis = plot_item.getAxis(side)
-        border_axis.setStyle(showValues=False, tickLength=0)
-        border_axis.setLabel(None)
+    _close_plot_box(plot_item)
 
     legend = _add_outside_legend(plot_item)
 
@@ -678,16 +684,21 @@ def build_residuals_plot(
     result,
     title: Optional[str] = None,
     threshold: Optional[float] = None,
+    soft_threshold: Optional[float] = None,
 ) -> pg.PlotWidget:
     """Relative residuals (ΔZ'/|Z| and ΔZ''/|Z|, in percent) of a validation
-    result (Kramers-Kronig or Z-HIT) against frequency, log-x."""
+    result (Kramers-Kronig or Z-HIT) against frequency, log-x.
+
+    `threshold` is the limit points are rejected at outright; `soft_threshold`
+    the advanced mode's inner limit, drawn only when the two differ."""
     freq, res_re, res_im = result.get_residuals_data()
 
     widget = pg.PlotWidget(title=title)
     plot_item = widget.getPlotItem()
     plot_item.showGrid(x=True, y=True, alpha=0.3)
-    plot_item.setLabel("bottom", "Frequency (Hz)")
-    plot_item.setLabel("left", "Relative residual (%)")
+    plot_item.setLabel("bottom", "Frequency [Hz]")
+    plot_item.setLabel("left", "Relative residual [%]")
+    _close_plot_box(plot_item)
     legend = _add_outside_legend(plot_item)
 
     # Plain percent values instead of pyqtgraph's SI-prefix axis scaling, which
@@ -720,21 +731,31 @@ def build_residuals_plot(
 
     y_extent = [float(v) for v in res_re] + [float(v) for v in res_im]
 
-    if threshold is not None and len(freq):
-        # PlotDataItem, not InfiniteLine: the legend swatch painter reads
-        # item.opts unconditionally, which InfiniteLine lacks. The resulting
-        # AttributeError inside a Qt paint() override aborts the process.
+    if len(freq):
         x_bounds = [float(freq.min()), float(freq.max())]
-        thr_pen = pg.mkPen("orange", width=1.5, style=Qt.DashLine)
-        top_line = pg.PlotDataItem(x=x_bounds, y=[threshold, threshold], pen=thr_pen)
-        bottom_line = pg.PlotDataItem(x=x_bounds, y=[-threshold, -threshold], pen=thr_pen)
-        plot_item.addItem(top_line, ignoreBounds=True)
-        plot_item.addItem(bottom_line, ignoreBounds=True)
-        legend.addItem(top_line, f"±{threshold}% threshold")
-        # ignoreBounds keeps these out of autorange, so an off-scale threshold
-        # cannot blow out the view; fold it into the fixed range instead so it
-        # stays visible.
-        y_extent += [threshold, -threshold]
+
+        def _limit_lines(level: float, color: str, name: str) -> None:
+            # PlotDataItem, not InfiniteLine: the legend swatch painter reads
+            # item.opts unconditionally, which InfiniteLine lacks. The resulting
+            # AttributeError inside a Qt paint() override aborts the process.
+            pen = pg.mkPen(color, width=1.5, style=Qt.DashLine)
+            top = pg.PlotDataItem(x=x_bounds, y=[level, level], pen=pen)
+            bottom = pg.PlotDataItem(x=x_bounds, y=[-level, -level], pen=pen)
+            plot_item.addItem(top, ignoreBounds=True)
+            plot_item.addItem(bottom, ignoreBounds=True)
+            legend.addItem(top, f"±{level}% {name}")
+            # ignoreBounds keeps these out of autorange, so an off-scale limit
+            # cannot blow out the view; fold it into the fixed range instead so
+            # it stays visible.
+            y_extent.extend([level, -level])
+
+        # Named for what they are only when there are two of them -- a lone
+        # limit has no soft one to be the "hard" half of.
+        paired = threshold is not None and soft_threshold is not None
+        if paired:
+            _limit_lines(soft_threshold, "#7fb069", "soft limit")
+        if threshold is not None:
+            _limit_lines(threshold, "orange", "hard limit" if paired else "threshold")
 
     # Must precede the fixed Y range below: updateLogMode re-triggers its own
     # autorange, which would clobber an earlier setYRange.
@@ -757,8 +778,9 @@ def build_drt_plot(results: List[Tuple[str, object]], title: str = "DRT") -> pg.
     widget = pg.PlotWidget(title=title)
     plot_item = widget.getPlotItem()
     plot_item.showGrid(x=True, y=True, alpha=0.3)
-    plot_item.setLabel("bottom", "Frequency (Hz)")
+    plot_item.setLabel("bottom", "Frequency [Hz]")
     plot_item.setLabel("left", "γ [Ω]")
+    _close_plot_box(plot_item)
     _add_outside_legend(plot_item)
 
     for i, (label, result) in enumerate(results):
@@ -799,8 +821,9 @@ def build_drt_peaks_plot(
     widget = pg.PlotWidget(title=title)
     plot_item = widget.getPlotItem()
     plot_item.showGrid(x=True, y=True, alpha=0.3)
-    plot_item.setLabel("bottom", "Frequency (Hz)")
+    plot_item.setLabel("bottom", "Frequency [Hz]")
     plot_item.setLabel("left", "γ [Ω]")
+    _close_plot_box(plot_item)
     _add_outside_legend(plot_item)
 
     for i, (label, peaks) in enumerate(results):

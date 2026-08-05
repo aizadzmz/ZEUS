@@ -8,27 +8,38 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
 from gui import style
-from gui.figure_panes import CircuitDiagramPane, PgFigurePane
+from gui.circuit_canvas import CircuitCanvas
+from gui.figure_panes import PgFigurePane
+from gui.segmented import SegmentedControl
 from gui.selection import SweepSelection
 from gui.steps.base import (
     StepPage,
     add_combo_items,
     compact_combo,
-    group_box,
     group_form,
+    quiet_group,
     section_label,
 )
 from gui.sweep_pager import SweepPager
+
+
+def _label_for(value: str) -> str:
+    """'least_squares' -> 'Least squares'. The stored value is unchanged; only
+    the machine identifier is kept out of the UI."""
+    return value.replace("_", " ").capitalize()
 
 
 class ECMStep(StepPage):
@@ -40,14 +51,14 @@ class ECMStep(StepPage):
         # ---------------------------------------------------------- settings
 
         self.add_display_mode_box(
-            "Plot view",
-            "One at a time shows a single sweep's fit and its circuit, "
-            "stepped through with the ‹ › controls. Combined overlays every "
+            "Plot Option",
+            "Singular shows a single sweep's fit and its circuit, "
+            "stepped through with the ‹ › controls. Multiple overlays every "
             "selected sweep's fit.",
         )
 
         ecm_box, form = group_form(
-            "ECM settings",
+            "ECM Settings",
             "Fits an equivalent circuit to each selected sweep by complex "
             "non-linear least squares.",
         )
@@ -64,7 +75,17 @@ class ECMStep(StepPage):
         )
         form.addRow("Preset", self.preset_combo)
 
+        self.build_hint_label = QLabel(
+            "Click the schematic below to edit it: a component to change its "
+            "type, values and bounds, a ⊕ on the wire to insert one, or "
+            "right-click for more."
+        )
+        self.build_hint_label.setWordWrap(True)
+        self.build_hint_label.setProperty("state", "muted")
+        form.addRow(self.build_hint_label)
+
         self.build_from_drt_button = QPushButton("Build circuit from DRT peaks")
+        self.build_from_drt_button.setProperty("variant", "secondary")
         self.build_from_drt_button.setToolTip(
             "Derive the circuit from the selected sweep's DRT peak analysis: "
             "one parallel R-CPE pair per resolved peak, in series with the "
@@ -91,19 +112,19 @@ class ECMStep(StepPage):
         form.addRow(section_label("Fit"))
 
         self.method_combo = compact_combo(QComboBox())
-        add_combo_items(self.method_combo, [(m, m) for m in FIT_METHODS])
+        add_combo_items(self.method_combo, [(_label_for(m), m) for m in FIT_METHODS])
         self.method_combo.setToolTip(
-            "'least_squares' is fast and always reports parameter error "
-            "bars. 'auto' tries every method and keeps the best-scoring one "
+            "'Least squares' is fast and always reports parameter error "
+            "bars. 'Auto' tries every method and keeps the best-scoring one "
             "— several times slower, and the winner is often a gradient-free "
             "method that reports no error bars at all."
         )
         form.addRow("Method", self.method_combo)
 
         self.weight_combo = compact_combo(QComboBox())
-        add_combo_items(self.weight_combo, [(w, w) for w in WEIGHT_FORMS])
+        add_combo_items(self.weight_combo, [(_label_for(w), w) for w in WEIGHT_FORMS])
         self.weight_combo.setToolTip(
-            "How each residual is weighted. 'boukamp' (1/|Z|²) is the EIS "
+            "How each residual is weighted. 'Boukamp' (1/|Z|²) is the EIS "
             "standard and stops the high-impedance end of the spectrum from "
             "dominating the fit."
         )
@@ -123,20 +144,17 @@ class ECMStep(StepPage):
         self.run_button.setProperty("variant", "primary")
         form.addRow(self.run_button)
 
-        self.shown_label = QLabel("Show fit")
-        self.shown_combo = compact_combo(QComboBox())
-        self.shown_combo.setToolTip(
-            "Which fitted circuit the plot above overlays. Every circuit you "
-            "fit is kept, so you can switch between them to compare."
-        )
-        form.addRow(self.shown_label, self.shown_combo)
+        # No circuit picker: the step shows the circuit in the code box above
+        # and nothing else, so guessing your way through a dozen of them does
+        # not leave a dozen on screen. Earlier fits stay cached and come back
+        # when their circuit is typed in again.
         self.shown_status_label = QLabel()
         self.shown_status_label.setWordWrap(True)
         self.shown_status_label.setProperty("state", "muted")
         form.addRow(self.shown_status_label)
         self.add_settings(ecm_box)
 
-        export_box, export_layout = group_box("Export")
+        export_box, export_layout = quiet_group()
         self.export_params_button = QPushButton("Export ECM parameters…")
         self.export_params_button.setToolTip(
             "Write the fitted parameters, and the fit curve, for the sweep on "
@@ -165,9 +183,10 @@ class ECMStep(StepPage):
         lower_col.addWidget(self.pager)
 
         circuit_splitter = QSplitter(Qt.Vertical)
-        self.circuit_pane = CircuitDiagramPane()
+        self.circuit_pane = self._build_circuit_pane()
         self.params_text = QPlainTextEdit()
         self.params_text.setReadOnly(True)
+        self.params_text.setProperty("role", "output")
         # Fixed-pitch: the fit report is pre-aligned text.
         self.params_text.setFont(style.mono_font())
         circuit_splitter.addWidget(self.circuit_pane)
@@ -194,3 +213,62 @@ class ECMStep(StepPage):
         self.cdc_edit.blockSignals(True)
         self.cdc_edit.setText(CIRCUIT_PRESETS[0][1])
         self.cdc_edit.blockSignals(False)
+
+    def _build_circuit_pane(self) -> QWidget:
+        """The editable schematic, with its caption above and toolbar below."""
+        pane = QWidget()
+        column = QVBoxLayout(pane)
+        column.setContentsMargins(*style.CONTENT_MARGINS)
+        column.setSpacing(style.GROUP_SPACING)
+
+        self.circuit_caption = QLabel()
+        self.circuit_caption.setObjectName("diagramCaption")
+        self.circuit_caption.setWordWrap(True)
+        column.addWidget(self.circuit_caption)
+
+        self.canvas = CircuitCanvas()
+        column.addWidget(self.canvas, stretch=1)
+
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(style.GROUP_SPACING)
+
+        self.add_element_button = QToolButton()
+        self.add_element_button.setText("Add element")
+        self.add_element_button.setPopupMode(QToolButton.InstantPopup)
+        self.add_element_button.setToolTip("Append a component to the end of the circuit.")
+        self.add_element_menu = QMenu(self.add_element_button)
+        self.add_element_button.setMenu(self.add_element_menu)
+        toolbar.addWidget(self.add_element_button)
+
+        self.undo_button = QToolButton()
+        self.undo_button.setText("Undo")
+        self.undo_button.setToolTip("Undo the last circuit edit (Ctrl+Z).")
+        toolbar.addWidget(self.undo_button)
+
+        self.redo_button = QToolButton()
+        self.redo_button.setText("Redo")
+        self.redo_button.setToolTip("Redo the last undone circuit edit (Ctrl+Shift+Z).")
+        toolbar.addWidget(self.redo_button)
+
+        self.clear_circuit_button = QToolButton()
+        self.clear_circuit_button.setText("Clear")
+        self.clear_circuit_button.setToolTip("Start from an empty circuit.")
+        toolbar.addWidget(self.clear_circuit_button)
+
+        toolbar.addStretch()
+
+        self.values_segmented = SegmentedControl(["Initial", "Fitted"])
+        self.values_segmented.setToolTip(
+            "Which values the schematic is labelled with: the starting values "
+            "that will be fitted, or the fitted result for the sweep on screen."
+        )
+        self.initial_values_radio = self.values_segmented.button(0)
+        self.fitted_values_radio = self.values_segmented.button(1)
+        toolbar.addWidget(self.values_segmented)
+
+        column.addLayout(toolbar)
+        return pane
+
+    @property
+    def values_mode(self) -> str:
+        return "Fitted" if self.fitted_values_radio.isChecked() else "Initial"

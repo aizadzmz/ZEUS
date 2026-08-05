@@ -9,8 +9,10 @@ from PySide6.QtCore import QObject, Signal
 
 # How many sweeps start checked per loaded file -- per file, not overall, so
 # opening a batch does not leave everything past the first file unchecked.
-# The checked set is exactly what analyses process.
-DEFAULT_SWEEPS_CHECKED_PER_FILE = 5
+# The checked set is exactly what analyses process, so a cap here trades a
+# lighter first analysis run against having to go and check the rest by hand.
+# None means no cap: every sweep in every file starts checked.
+DEFAULT_SWEEPS_CHECKED_PER_FILE: Optional[int] = None
 
 
 class SweepSelection(QObject):
@@ -48,6 +50,9 @@ class SweepSelection(QObject):
         self.cursor_moved.emit()
 
     def _default_checked(self) -> Set[str]:
+        if DEFAULT_SWEEPS_CHECKED_PER_FILE is None:
+            return {ds.key for ds in self._datasets}
+
         seen: Dict[int, int] = {}
         checked: Set[str] = set()
         for ds in self._datasets:
@@ -82,6 +87,23 @@ class SweepSelection(QObject):
             self._checked.add(key)
         else:
             self._checked.discard(key)
+        moved = self._reseat_cursor()
+        self.selection_changed.emit()
+        if moved:
+            self.cursor_moved.emit()
+
+    def set_checked_many(self, keys: Iterable[str], checked: bool) -> None:
+        """Check or uncheck a group of sweeps as one edit.
+
+        Looping over set_checked() instead would emit selection_changed per
+        sweep, and MainWindow turns each of those into a full replot -- so
+        ticking one 50-sweep file would redraw the plots 50 times.
+        """
+        keys = set(keys)
+        new = self._checked | keys if checked else self._checked - keys
+        if new == self._checked:
+            return
+        self._checked = new
         moved = self._reseat_cursor()
         self.selection_changed.emit()
         if moved:

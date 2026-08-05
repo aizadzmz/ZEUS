@@ -1,3 +1,11 @@
+"""Manual visual check of the generic EIS parser and inductive masking -- not a
+test.
+
+Point SAMPLE_FILE at a local .mpt and run it directly; each plot blocks until
+you close its window. Lived in test/ until it was moved here, where pytest
+does not try to collect it.
+"""
+
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
@@ -6,8 +14,10 @@ from core import parse_eis_file
 from core.filtering import mask_inductive_points
 from core.plotting import build_nyquist_plot
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SAMPLE_FILE = PROJECT_ROOT / "C:/Users/aizad/Downloads/EIS_for_Aizad/363/cyclage 363 NMC811 Coated 220622 37 vs Gr Cid  LP57+2%VC ICA DVA + IMPEDANCE_05_PEIS_07.mpt"
+SAMPLE_FILE = Path(
+    r"C:\Users\aizad\Downloads\EIS_for_Aizad\363"
+    r"\cyclage 363 NMC811 Coated 220622 37 vs Gr Cid  LP57+2%VC ICA DVA + IMPEDANCE_05_PEIS_07.mpt"
+)
 
 datasets = parse_eis_file(SAMPLE_FILE)
 print(f"Found {len(datasets)} dataset(s)\n")

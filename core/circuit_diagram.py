@@ -1,12 +1,20 @@
-"""Schematic drawings of an equivalent circuit, annotated per component."""
+"""Schematic drawings of an equivalent circuit, annotated per component.
+
+The walk can also report where each part landed (see HitRegion), which is what
+lets gui/circuit_canvas.py map a click back to a core.circuit_model node.
+"""
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Dict, List, Optional
+from dataclasses import dataclass, field
+from itertools import repeat
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from pyimpspec import Circuit
     from pyimpspec.analysis.fitting import FitResult
+
+    from core.circuit_model import ConnectionNode
 
 # Element body length and parallel-branch separation, in drawing units. Larger
 # than pyimpspec's defaults (2.0, 1.5) because every element carries a label
@@ -29,6 +37,17 @@ LINE_SPACING = 0.36
 # text extents when sizing the SVG and clips the top label without this.
 SVG_PADDING = 16.0
 
+# --- hit-region geometry, in drawing units -----------------------------------
+# A placed element spans the full UNIT_WIDTH including leads, so neighbours in a
+# series touch; insetting its box leaves room for the gap target between them.
+ELEMENT_INSET = 0.6
+# Half-extents of a gap box, kept under ELEMENT_INSET so the two never overlap.
+GAP_HALF_WIDTH = 0.5
+GAP_HALF_HEIGHT = 0.5
+# A parallel is grabbed by the vertical rail joining its branches.
+RAIL_HALF_WIDTH = 0.35
+MIN_HALF_HEIGHT = 0.5
+
 _SUBSCRIPT = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
 # Engineering prefixes, keyed by the power of ten they stand for.
@@ -49,11 +68,51 @@ _UNIT_TEXT = {
 }
 
 
-def _unit_text(unit: str) -> str:
+@dataclass(frozen=True)
+class HitRegion:
+    """One clickable area, in the finished SVG's viewBox points. kind is
+    "element", "connection" (a parallel's rail), or "gap" -- an insertion point
+    in the series `node_id`, at position `index`."""
+
+    kind: str
+    node_id: int
+    rect: Tuple[float, float, float, float]  # x, y, width, height
+    index: int = -1
+
+    def contains(self, x: float, y: float) -> bool:
+        left, top, width, height = self.rect
+        return left <= x <= left + width and top <= y <= top + height
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        left, top, width, height = self.rect
+        return left + width / 2.0, top + height / 2.0
+
+
+@dataclass
+class CircuitDrawing:
+    """A schematic plus the map from its pixels back to the circuit tree."""
+
+    svg: bytes
+    viewbox: Tuple[float, float, float, float]  # x, y, width, height
+    regions: List[HitRegion] = field(default_factory=list)
+
+    def region_at(self, x: float, y: float) -> Optional[HitRegion]:
+        """The region under a viewBox point; elements win ties."""
+        hits = [region for region in self.regions if region.contains(x, y)]
+        if not hits:
+            return None
+        return min(hits, key=lambda region: 0 if region.kind == "element" else 1)
+
+
+def unit_text(unit: str) -> str:
     """pyimpspec's ASCII unit string as something readable on a diagram."""
     if unit in _UNIT_TEXT:
         return _UNIT_TEXT[unit]
     return unit.replace("*", "·")
+
+
+_unit_text = unit_text
 
 
 def format_quantity(value: float, unit: str) -> str:
@@ -148,11 +207,15 @@ def _build_svg(
     foreground: str,
     accent: str,
     show_errors: bool,
-) -> bytes:
-    """Walk the circuit and emit the schematic as SVG bytes."""
+    tree: Optional[ConnectionNode] = None,
+) -> CircuitDrawing:
+    """Walk the circuit and draw it. Passing the core.circuit_model `tree` the
+    circuit was built from turns on hit-region collection -- the two are walked
+    in lockstep, since to_circuit builds connections child-for-child in order."""
     import schemdraw.elements as elm
     from pyimpspec import Element, Parallel, Series
     from schemdraw import Drawing
+    from schemdraw.backends import svg as svg_backend
     from schemdraw.backends.svg import config as svg_config
 
     # Qt's SVG renderer is SVG 1.2 Tiny, which has no dominant-baseline, so
@@ -161,8 +224,17 @@ def _build_svg(
     svg_config.useBatik = True
 
     symbols = _schemdraw_symbols()
+    # Collected in drawing units and converted once the scale is known.
+    boxes: List[Tuple[str, int, int, Tuple[float, float, float, float]]] = []
 
-    def draw_element(element, drawing: Drawing) -> None:
+    def record(kind: str, node, bounds, index: int = -1) -> None:
+        if node is not None:
+            boxes.append((kind, node.node_id, index, bounds))
+
+    def children_of(node) -> object:
+        return node.children if node is not None else repeat(None)
+
+    def draw_element(element, drawing: Drawing, node=None) -> None:
         name = circuit.get_element_name(element)
         symbol = symbols.get(type(element), elm.ResistorIEC)()
         symbol.label(
@@ -185,6 +257,11 @@ def _build_svg(
                 color=accent,
             )
         drawing.add(symbol.right())
+        if node is not None:
+            # includetext=False: labels sit clear of the body and would make
+            # adjacent components' targets overlap.
+            left, bottom, right, top = symbol.get_bbox(transform=True, includetext=False)
+            record("element", node, (left + ELEMENT_INSET, bottom, right - ELEMENT_INSET, top))
 
     def width(item) -> float:
         if isinstance(item, Element):
@@ -205,9 +282,10 @@ def _build_svg(
             return max(height(child) for child in item)
         return sum(height(child) for child in item)
 
-    def draw_parallel(parallel, drawing: Drawing) -> None:
+    def draw_parallel(parallel, drawing: Drawing, node=None) -> None:
         branches = list(parallel)
         heights = [height(branch) for branch in branches]
+        top_x, top_y = drawing.here
 
         # Drop to the lowest branch, remembering each rung on the way down,
         # so the branches can be drawn bottom-up and popped back to the node.
@@ -215,9 +293,19 @@ def _build_svg(
             drawing.push()
             drawing.add(elm.Line(l=heights[index]).down())
 
+        # The rail just descended is the parallel's own handle.
+        drop = max(sum(heights[:-1]), 2 * MIN_HALF_HEIGHT)
+        record(
+            "connection",
+            node,
+            (top_x - RAIL_HALF_WIDTH, top_y - drop, top_x + RAIL_HALF_WIDTH, top_y),
+        )
+
         total = width(parallel)
-        for index, branch in reversed(list(enumerate(branches))):
-            draw_branch(branch, drawing)
+        for index, (branch, child) in reversed(
+            list(enumerate(zip(branches, children_of(node))))
+        ):
+            draw_branch(branch, drawing, child)
             padding = total - width(branch)
             if padding > 0:
                 drawing.add(elm.Line(l=padding).right())
@@ -225,30 +313,42 @@ def _build_svg(
                 drawing.add(elm.Line(l=heights[index - 1]).up())
                 drawing.pop()
 
-    def draw_branch(item, drawing: Drawing) -> None:
+    def draw_branch(item, drawing: Drawing, node=None) -> None:
         if isinstance(item, Element):
-            draw_element(item, drawing)
+            draw_element(item, drawing, node)
         elif isinstance(item, Series):
-            draw_series(item, drawing)
+            draw_series(item, drawing, node)
         else:
-            draw_parallel(item, drawing)
+            draw_parallel(item, drawing, node)
 
-    def draw_series(series, drawing: Drawing, outermost: bool = False) -> None:
+    def draw_series(series, drawing: Drawing, node=None, outermost: bool = False) -> None:
         items = list(series)
-        for index, item in enumerate(items):
+        for index, (item, child) in enumerate(zip(items, children_of(node))):
+            gap_at(index, drawing, node)
             if isinstance(item, Parallel):
                 # Short leads keep adjacent parallel blocks (the usual
                 # R(RQ)(RQ) shape) off a shared vertical rail, which would
                 # read as one four-branch node.
                 if not outermost:
                     drawing.add(elm.Line(l=0.5).right())
-                draw_parallel(item, drawing)
+                draw_parallel(item, drawing, child)
                 if not outermost or (
                     index < len(items) - 1 and isinstance(items[index + 1], Parallel)
                 ):
                     drawing.add(elm.Line(l=0.5).right())
             else:
-                draw_branch(item, drawing)
+                draw_branch(item, drawing, child)
+        gap_at(len(items), drawing, node)
+
+    def gap_at(index: int, drawing: Drawing, node) -> None:
+        """An insertion target on the wire at the cursor's current position."""
+        x, y = drawing.here
+        record(
+            "gap",
+            node,
+            (x - GAP_HALF_WIDTH, y - GAP_HALF_HEIGHT, x + GAP_HALF_WIDTH, y + GAP_HALF_HEIGHT),
+            index,
+        )
 
     drawing = Drawing(canvas="svg")
     drawing.config(
@@ -262,11 +362,48 @@ def _build_svg(
     drawing.add(elm.Line(l=1.0).right())
     # A Circuit always reports exactly one outermost Series (the implicit
     # square brackets of the CDC), which is the connection to walk.
-    draw_series(circuit.get_connections(recursive=False)[0], drawing, outermost=True)
+    draw_series(circuit.get_connections(recursive=False)[0], drawing, tree, outermost=True)
     drawing.add(elm.Line(l=1.0).right())
     drawing.add(elm.Dot(open=True))
 
-    return _pad_svg(drawing.get_imagedata("svg"), SVG_PADDING)
+    data = _pad_svg(drawing.get_imagedata("svg"), SVG_PADDING)
+    # The svg backend maps drawing units to viewBox points as (x, -y) * scale.
+    scale = getattr(svg_backend, "PT_PER_IN", 72.0) * drawing.dwgparams.get(
+        "inches_per_unit", 0.5
+    )
+    return CircuitDrawing(
+        svg=data,
+        viewbox=_svg_viewbox(data),
+        regions=[_to_region(kind, node_id, index, bounds, scale) for kind, node_id, index, bounds in boxes],
+    )
+
+
+def _to_region(kind, node_id, index, bounds, scale: float) -> HitRegion:
+    left, bottom, right, top = bounds
+    half = max(MIN_HALF_HEIGHT, (top - bottom) / 2.0)
+    middle = (top + bottom) / 2.0
+    # y flips, so the drawing's top edge becomes the rect's smaller coordinate.
+    return HitRegion(
+        kind=kind,
+        node_id=node_id,
+        index=index,
+        rect=(
+            left * scale,
+            -(middle + half) * scale,
+            (right - left) * scale,
+            2 * half * scale,
+        ),
+    )
+
+
+def _svg_viewbox(data: bytes) -> Tuple[float, float, float, float]:
+    """Read the finished SVG's viewBox, so regions and picture share a frame."""
+    import re
+
+    box = re.search(rb'viewBox="(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)"', data[:2000])
+    if box is None:
+        return (0.0, 0.0, 1.0, 1.0)
+    return tuple(float(value) for value in box.groups())  # type: ignore[return-value]
 
 
 def _pad_svg(data: bytes, padding: float) -> bytes:
@@ -313,7 +450,7 @@ def build_fit_diagram(
         foreground=foreground,
         accent=accent,
         show_errors=show_errors,
-    )
+    ).svg
 
 
 def build_preview_diagram(
@@ -332,4 +469,27 @@ def build_preview_diagram(
         foreground=foreground,
         accent=accent,
         show_errors=False,
+    ).svg
+
+
+def build_editor_drawing(
+    tree: ConnectionNode,
+    *,
+    parameters: Optional[Dict[str, Dict[str, object]]] = None,
+    foreground: str = "#252931",
+    accent: str = "#6b7280",
+    show_errors: bool = True,
+) -> CircuitDrawing:
+    """A circuit tree drawn with its hit regions, for the editable canvas.
+    Pass a fit result's `parameters` to annotate with fitted values instead of
+    the tree's own initial ones."""
+    from core.circuit_model import to_circuit
+
+    return _build_svg(
+        to_circuit(tree),
+        parameters,
+        foreground=foreground,
+        accent=accent,
+        show_errors=show_errors,
+        tree=tree,
     )
