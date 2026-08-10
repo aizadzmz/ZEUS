@@ -1,6 +1,8 @@
 #KK and Z-HT
 from dataclasses import dataclass, field
-from typing import Callable, List, Union
+from typing import Callable, List, Tuple, Union
+
+import numpy as np
 
 # Import for side effects: replaces pyimpspec's loop-driven curvature
 # calculation, which dominates the Kramers-Kronig run time. Must come before
@@ -19,6 +21,98 @@ ValidationResult = Union[KramersKronigResult, ZHITResult]
 # fit has too little left to be consistent *with*, and the loop starts chasing
 # its own residuals rather than the data's.
 MIN_POINTS_AFTER_PRUNE = 8
+
+# How a residual is made relative. Both conventions are in use, and they
+# disagree by the factor |Z| / |Z_component|:
+#
+#   MODULUS   -- DZ'/|Z| and DZ''/|Z|, what pyimpspec reports (Schoenleber et
+#                al. 2014, eqs. 15-16). One common scale for both parts, so a
+#                point's two residuals are directly comparable.
+#   COMPONENT -- DZ'/|Z'| and DZ''/|Z''|, each part against its own magnitude:
+#                the error on that part as a fraction of that part.
+#
+# This is not display-only. The threshold, soft and hard limits reject on
+# whichever convention is chosen, so the limit lines drawn across the residual
+# plot always mark the points that were actually removed.
+RESIDUAL_BY_MODULUS = "modulus"
+RESIDUAL_BY_COMPONENT = "component"
+RESIDUAL_MODES = (RESIDUAL_BY_MODULUS, RESIDUAL_BY_COMPONENT)
+
+# COMPONENT is deliberately uncapped. Z'' passes through zero entering an
+# inductive tail and again as an arc closes back onto the real axis, and Z' can
+# be small on a strongly capacitive sweep; the ratio grows without bound there.
+# That is the intent -- a point whose component is not resolved above the noise
+# is a point to drop, and rejection reads these numbers directly.
+#
+# The one case arithmetic cannot express is a component of exactly 0.0; see
+# _relative_to for what happens there.
+
+
+def _measured_impedances(result: ValidationResult) -> np.ndarray:
+    """Z_exp, recovered from what a validation result carries.
+
+    A result stores the fit Z_fit and the residuals r = (Z_exp - Z_fit)/|Z_exp|
+    but not Z_exp itself. Writing m for |Z_exp|, Z_exp = Z_fit + r*m, and
+    taking the modulus of both sides squares to
+
+        (1 - |r|^2) m^2 - 2 Re(Z_fit * conj(r)) m - |Z_fit|^2 = 0,
+
+    whose positive root is m. Exact to rounding while |r| < 1, which a residual
+    of a few percent is by three orders of magnitude.
+    """
+    r = np.asarray(result.residuals)
+    Z_fit = np.asarray(result.impedances)
+    a = 1.0 - np.abs(r) ** 2
+    b = -2.0 * np.real(Z_fit * np.conj(r))
+    c = -np.abs(Z_fit) ** 2
+    modulus = (-b + np.sqrt(b * b - 4.0 * a * c)) / (2.0 * a)
+    return Z_fit + r * modulus
+
+
+def _relative_to(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    """numerator / denominator, with the two zero-denominator cases decided
+    rather than left to float arithmetic.
+
+    A component of exactly 0.0 is rare -- it needs the measured Z' or Z'' to be
+    a hard zero, not merely small -- but it has to land somewhere:
+
+    * error present, component zero (x/0) -> signed infinity. The error is
+      infinitely large as a fraction of the component, so the point exceeds
+      every threshold and is rejected. That is the limit of the surrounding
+      points' behaviour, not a special case bolted on.
+    * no error, component zero (0/0) -> 0.0. The fit reproduced a component
+      that is itself zero; there is no discrepancy to express as a fraction of
+      anything, and calling that an outlier would be wrong. Left as NaN it
+      would be worse than wrong: NaN fails every `>` comparison, so the point
+      would be silently *kept* whatever the threshold.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = np.asarray(numerator / denominator, dtype=float)
+    return np.where(np.isnan(out), 0.0, out)
+
+
+def relative_residuals(
+    result: ValidationResult, mode: str = RESIDUAL_BY_MODULUS
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(frequencies, real residuals, imaginary residuals) in percent, under the
+    chosen convention. The MODULUS pair is passed through from pyimpspec
+    untouched; see RESIDUAL_MODES."""
+    if mode not in RESIDUAL_MODES:
+        raise ValueError(f"Unknown residual mode {mode!r}; expected one of {RESIDUAL_MODES}.")
+
+    freq, res_re, res_im = result.get_residuals_data()
+    if mode == RESIDUAL_BY_MODULUS:
+        return freq, res_re, res_im
+
+    # Both conventions share a numerator, so rescaling by |Z| / |Z_component|
+    # is all that separates them.
+    Z_exp = _measured_impedances(result)
+    modulus = np.abs(Z_exp)
+    return (
+        freq,
+        _relative_to(res_re * modulus, np.abs(Z_exp.real)),
+        _relative_to(res_im * modulus, np.abs(Z_exp.imag)),
+    )
 
 
 def run_kk_test(
@@ -55,20 +149,25 @@ def unmasked_indices(dataset) -> List[int]:
     ]
 
 
-def residual_deviations(result: ValidationResult) -> List[float]:
+def residual_deviations(
+    result: ValidationResult, mode: str = RESIDUAL_BY_MODULUS
+) -> List[float]:
     """How far each point strays, as max(|ΔZ'|, |ΔZ''|) in percent -- the same
     "either part is enough" rule mask_residual_outliers rejects on."""
-    _, res_re, res_im = result.get_residuals_data()
+    _, res_re, res_im = relative_residuals(result, mode)
     return [max(abs(float(re)), abs(float(im))) for re, im in zip(res_re, res_im)]
 
 
 def mask_residual_outliers(
-    dataset, result: ValidationResult, threshold_percent: float
+    dataset,
+    result: ValidationResult,
+    threshold_percent: float,
+    mode: str = RESIDUAL_BY_MODULUS,
 ) -> None:
     """Mask points whose relative residual exceeds threshold_percent, in place.
     Already-masked points stay masked."""
     indices = unmasked_indices(dataset)
-    deviations = residual_deviations(result)
+    deviations = residual_deviations(result, mode)
     if len(indices) != len(deviations):
         raise ValueError(
             "Validation result does not match the dataset's current mask; "
@@ -103,6 +202,7 @@ def prune_iteratively(
     hard_percent: float,
     soft_percent: float,
     max_removed: int,
+    residual_mode: str = RESIDUAL_BY_MODULUS,
 ) -> PruneOutcome:
     """Validate, drop the worst offenders, and validate again until nothing is
     left above soft_percent.
@@ -111,6 +211,9 @@ def prune_iteratively(
     beyond argument -- and otherwise the single worst point above soft_percent,
     one per pass, because removing a point moves every other point's residual
     and the next-worst may well come back inside the limit on its own.
+
+    Both limits are read under `residual_mode` (see RESIDUAL_MODES), so which
+    points count as offenders depends on it.
 
     Runs on a detached copy, so the caller's mask is untouched and this is safe
     to hand to a worker thread or subprocess; apply `removed` yourself.
@@ -129,7 +232,7 @@ def prune_iteratively(
     outcome = PruneOutcome(result=runner(working))
     while True:
         indices = unmasked_indices(working)
-        deviations = residual_deviations(outcome.result)
+        deviations = residual_deviations(outcome.result, residual_mode)
         if len(indices) != len(deviations):
             raise ValueError(
                 "Validation result does not match the dataset's current mask; "

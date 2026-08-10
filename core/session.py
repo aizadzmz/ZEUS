@@ -329,9 +329,12 @@ def ui_state_to_dict(
     soft_limit: Optional[float] = None,
     hard_limit: Optional[float] = None,
     max_removed: Optional[int] = None,
+    residual_mode: Optional[str] = None,
 ) -> dict:
     # The advanced mode's fields are optional: a session saved before it
-    # existed has none, and load falls back to the widgets' own defaults.
+    # existed has none, and load falls back to the widgets' own defaults. So is
+    # residual_mode, for the same reason -- and a session predating it was
+    # rejected under the modulus convention, which is that default.
     return {
         "manual_masked": {key: sorted(idxs) for key, idxs in manual_masked.items()},
         "manual_kept": {key: sorted(idxs) for key, idxs in manual_kept.items()},
@@ -342,6 +345,7 @@ def ui_state_to_dict(
         "soft_limit": soft_limit,
         "hard_limit": hard_limit,
         "max_removed": max_removed,
+        "residual_mode": residual_mode,
     }
 
 
@@ -366,6 +370,7 @@ def ui_state_from_dict(d: dict, key_by_label: Optional[Dict[str, str]] = None) -
         "soft_limit": d.get("soft_limit"),
         "hard_limit": d.get("hard_limit"),
         "max_removed": d.get("max_removed"),
+        "residual_mode": d.get("residual_mode"),
     }
 
 
