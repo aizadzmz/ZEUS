@@ -168,6 +168,60 @@ class SweepSelection(QObject):
             return False
         return 0 < index + delta <= count
 
+    # --------------------------------------------------------- by whole file
+
+    def _checked_files(self) -> List[tuple]:
+        """The checked sweeps grouped by source file, in load order, as
+        (file_id, key of its first checked sweep).
+
+        Files with nothing checked do not appear: paging by file lands on a
+        sweep, so a file offering none is not a place the cursor can go.
+        """
+        files: List[tuple] = []
+        seen: Set[int] = set()
+        for ds in self.selected():
+            if ds.file_id not in seen:
+                seen.add(ds.file_id)
+                files.append((ds.file_id, ds.key))
+        return files
+
+    def _current_file_index(self, files: List[tuple]) -> int:
+        """Where the cursor's file sits in ``files``. Falls back to the first
+        file when the cursor is unseated, matching step_cursor()."""
+        current = self.current()
+        if current is None:
+            return 0
+        return next(
+            (i for i, (file_id, _) in enumerate(files) if file_id == current.file_id),
+            0,
+        )
+
+    def step_file(self, delta: int) -> None:
+        """Move the cursor to the first checked sweep of the file delta places
+        away, clamping at both ends rather than wrapping.
+
+        Always lands on that file's first sweep, including when stepping back
+        from mid-file -- `‹‹` means "the file before this one", not "the top of
+        this one", so two clicks never sit on the same file.
+        """
+        files = self._checked_files()
+        if not files:
+            return
+        index = self._current_file_index(files)
+        new_index = max(0, min(len(files) - 1, index + delta))
+        key = files[new_index][1]
+        if key != self._cursor_key:
+            self._cursor_key = key
+            self.cursor_moved.emit()
+
+    def can_step_file(self, delta: int) -> bool:
+        """Whether stepping by delta whole files would actually move -- drives
+        the `<< >>` buttons' enabled state."""
+        files = self._checked_files()
+        if not files:
+            return False
+        return 0 <= self._current_file_index(files) + delta < len(files)
+
     def _reseat_cursor(self) -> bool:
         """Keep the cursor on a checked sweep. Returns whether it moved."""
         selected = self.selected()

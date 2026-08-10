@@ -1,4 +1,5 @@
-"""The compact `File Name | Set Number | < >` strip between a step's two plots."""
+"""The compact `File Name | Set Number | << < > >>` strip between a step's two
+plots."""
 
 from __future__ import annotations
 
@@ -44,17 +45,35 @@ class SweepPager(QWidget):
             label.setFont(font)
         row.addWidget(self.position_label)
 
+        # `‹‹ ‹ | › ››`: the inner pair walks the checked sweeps flat, crossing
+        # into the next file at a file's end; the outer pair skips a whole file
+        # at a time. The gap groups them by direction, as a media player does,
+        # so the four do not read as one undifferentiated run of arrows.
+        self.prev_file_button = QToolButton()
+        self.prev_file_button.setText("‹‹")
+        self.prev_file_button.setToolTip("First sweep of the previous file")
+        self.prev_file_button.clicked.connect(lambda: self._selection.step_file(-1))
+        row.addWidget(self.prev_file_button)
+
         self.prev_button = QToolButton()
         self.prev_button.setText("‹")
         self.prev_button.setToolTip("Previous selected sweep")
         self.prev_button.clicked.connect(lambda: self._selection.step_cursor(-1))
         row.addWidget(self.prev_button)
 
+        row.addSpacing(style.PAGER_ARROW_GAP)
+
         self.next_button = QToolButton()
         self.next_button.setText("›")
         self.next_button.setToolTip("Next selected sweep")
         self.next_button.clicked.connect(lambda: self._selection.step_cursor(1))
         row.addWidget(self.next_button)
+
+        self.next_file_button = QToolButton()
+        self.next_file_button.setText("››")
+        self.next_file_button.setToolTip("First sweep of the next file")
+        self.next_file_button.clicked.connect(lambda: self._selection.step_file(1))
+        row.addWidget(self.next_file_button)
 
         # Both signals matter: the cursor moves on its own, but checking or
         # unchecking sweeps also changes the "2 of 7" readout and can reseat
@@ -83,3 +102,5 @@ class SweepPager(QWidget):
 
         self.prev_button.setEnabled(self._selection.can_step(-1))
         self.next_button.setEnabled(self._selection.can_step(1))
+        self.prev_file_button.setEnabled(self._selection.can_step_file(-1))
+        self.next_file_button.setEnabled(self._selection.can_step_file(1))

@@ -54,7 +54,7 @@ class DRTStep(StepPage):
         # ---------------------------------------------------------- settings
 
         self.add_display_mode_box(
-            "Plot Option",
+            "Disply Option",
             "Singular shows a single sweep's DRT, stepped through with "
             "the ‹ › controls. Multiple draws every selected sweep's DRT on "
             "one figure.",
@@ -310,7 +310,13 @@ class DRTStep(StepPage):
         self.export_results_button = QPushButton("Export DRT results…")
         self.export_results_button.setToolTip(
             "Write the DRT curve, and the fitted peaks if any, for the sweep "
-            "on screen. Use File ▸ Save session to keep everything instead."
+            "on screen. Use File ▸ Save session to keep everything instead.\n\n"
+            "Pick the format in the save dialog:\n"
+            "• DRT table (.csv) — τ and γ as written, plus a companion "
+            "'_peaks.csv'.\n"
+            "• ZView data file (.z) — the curve with τ mapped to a frequency "
+            "so ZView can plot it, plus the peaks as an Rs(RC)(RC)… model "
+            "(.mdl) ZView can fit from."
         )
         self.export_results_button.setProperty("variant", "quiet")
         export_layout.addWidget(self.export_results_button)

@@ -26,6 +26,8 @@ CONTENT_MARGINS = (8, 6, 8, 6)     # header rows above a plot
 LIST_SPACING = 8                   # between stacked figures
 PAGER_FIELD_GAP = 24               # sweep pager: File ... | Set ... , so the
                                    # two readouts do not read as one phrase
+PAGER_ARROW_GAP = 10               # sweep pager: `‹‹ ‹ | › ››`, splitting the
+                                   # four arrows into a back and a forward group
 
 RADIUS = 6
 
@@ -351,6 +353,36 @@ QWidget#figureOverlay QToolButton:checked {{
     color: {t["accent_text"]};
 }}
 QWidget#figureOverlay QToolButton:disabled {{
+    color: {t["text_muted"]};
+}}
+/* The fold-away chevron. Not inside #figureOverlay: it sits in the axis strip
+   below the plot, so it needs the card's own surface to read against the pane
+   rather than inheriting the buttons' transparent one. Slim and quiet -- it is
+   a handle, not a fifth action. */
+QToolButton#figureOverlayCollapse {{
+    background: {t["surface_alt"]};
+    border: 1px solid {t["border"]};
+    border-radius: 4px;
+    padding: 0px 8px;
+    min-height: 13px;
+    color: {t["text_muted"]};
+    font-size: 10px;
+}}
+QToolButton#figureOverlayCollapse:hover {{
+    background: {t["accent_subtle"]};
+    color: {t["accent"]};
+}}
+/* Checked means "folded", which is a resting state, not an armed one -- so it
+   must not pick up the filled treatment the eraser uses. */
+QToolButton#figureOverlayCollapse:checked {{
+    background: {t["surface_alt"]};
+    color: {t["text_muted"]};
+}}
+QToolButton#figureOverlayCollapse:checked:hover {{
+    background: {t["accent_subtle"]};
+    color: {t["accent"]};
+}}
+QToolButton#figureOverlayCollapse:disabled {{
     color: {t["text_muted"]};
 }}
 """

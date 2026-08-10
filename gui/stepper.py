@@ -8,10 +8,11 @@ One paintEvent keeps the geometry in a single place."""
 
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPen
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from gui import style
@@ -37,6 +38,8 @@ EDGE_PAD = 10            # widget edge -> first/last node, on top of the
 TOP_PAD = 8
 BOTTOM_PAD = 8
 HOTSPOT_PAD = 16         # widened either side of a label, for clicking
+LABEL_SLACK = 4          # headroom on a label rect, so a rounded-up width can
+                         # never come out under what QPainter lays out
 
 
 class StepBar(QWidget):
@@ -84,9 +87,22 @@ class StepBar(QWidget):
         font.setPointSizeF(style.FONT_PT_STEPPER)
         return font
 
+    def _metrics(self) -> QFontMetricsF:
+        """Metrics bound to this widget as the paint device.
+
+        A QFontMetrics built from the font alone measures against the
+        application's default DPI. On a fractionally scaled screen that comes
+        out narrower than what QPainter actually lays out, and a label rect
+        sized from it elides text that in fact fits.
+        """
+        return QFontMetricsF(self._label_font(), self)
+
     def _label_widths(self) -> List[int]:
-        fm = QFontMetrics(self._label_font())
-        return [fm.horizontalAdvance(label) for _, label in STEPS]
+        fm = self._metrics()
+        # Rounded up, never down: a rect a fraction of a pixel short of the
+        # text is a rect that elides.
+        return [int(math.ceil(fm.horizontalAdvance(label))) + LABEL_SLACK
+                for _, label in STEPS]
 
     def _margin(self) -> float:
         """Room for the end labels, which are centred on the end nodes and so
@@ -102,11 +118,11 @@ class StepBar(QWidget):
         return [margin + span * i / gaps for i in range(len(STEPS))]
 
     def _track_y(self) -> float:
-        fm = QFontMetrics(self._label_font())
+        fm = self._metrics()
         return TOP_PAD + fm.height() + LABEL_GAP + NODE_RADIUS
 
     def sizeHint(self) -> QSize:
-        fm = QFontMetrics(self._label_font())
+        fm = self._metrics()
         width = int(sum(self._label_widths()) + 2 * EDGE_PAD * len(STEPS))
         height = int(TOP_PAD + fm.height() + LABEL_GAP + 2 * NODE_RADIUS + BOTTOM_PAD)
         return QSize(width, height)
@@ -134,8 +150,12 @@ class StepBar(QWidget):
         painter.setPen(QPen(track, TRACK_WIDTH, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(QPointF(xs[0], cy), QPointF(xs[-1], cy))
 
-        fm = QFontMetrics(self._label_font())
-        widths = self._label_widths()
+        # Widths from the painter's own metrics rather than the widget's: the
+        # two disagree across screens with different scale factors, and it is
+        # the painter's that decide whether a label fits the rect it is given.
+        fm = painter.fontMetrics()
+        widths = [int(math.ceil(fm.horizontalAdvance(label))) + LABEL_SLACK
+                  for _, label in STEPS]
 
         for i, (_, label) in enumerate(STEPS):
             current = i == self._current
@@ -157,13 +177,13 @@ class StepBar(QWidget):
             text_color = QColor(t["text"] if current or hovered else t["text_muted"])
             painter.setPen(QPen(text_color))
             painter.setBrush(Qt.NoBrush)
-            rect = self._label_rect(i, xs[i], widths[i], fm)
+            rect = self._label_rect(xs[i], widths[i], fm.height())
             painter.drawText(rect, Qt.AlignHCenter | Qt.AlignBottom,
                              fm.elidedText(label, Qt.ElideRight, int(rect.width())))
 
-    def _label_rect(self, index: int, x: float, width: int, fm: QFontMetrics) -> QRectF:
+    def _label_rect(self, x: float, width: int, height: float) -> QRectF:
         left = min(max(x - width / 2, 0.0), max(self.width() - width, 0.0))
-        return QRectF(left, TOP_PAD, min(float(width), float(self.width())), fm.height())
+        return QRectF(left, TOP_PAD, min(float(width), float(self.width())), height)
 
     # ------------------------------------------------------------- input
 
@@ -171,10 +191,10 @@ class StepBar(QWidget):
         """The step whose label/node column contains ``x``, if any."""
         if not (0 <= y <= self.height()):
             return None
-        fm = QFontMetrics(self._label_font())
+        fm = self._metrics()
         widths = self._label_widths()
         for i, node_x in enumerate(self._node_positions()):
-            rect = self._label_rect(i, node_x, widths[i], fm)
+            rect = self._label_rect(node_x, widths[i], fm.height())
             if rect.left() - HOTSPOT_PAD <= x <= rect.right() + HOTSPOT_PAD:
                 return i
         return None

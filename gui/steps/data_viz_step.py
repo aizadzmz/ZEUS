@@ -75,6 +75,16 @@ class DataVizStep(StepPage):
         self.markers_radio = marker_style.button(0)
         self.line_radio = marker_style.button(1)
         plot_form.addRow("Style", marker_style)
+
+        # A popup rather than rows here: the marker list is per loaded file, so
+        # it cannot be laid out until the files are known.
+        self.marker_style_button = QPushButton("Marker & line style…")
+        self.marker_style_button.setProperty("variant", "secondary")
+        self.marker_style_button.setToolTip(
+            "Choose the marker shape for each loaded file, and the marker size "
+            "and line width shared by all of them."
+        )
+        plot_form.addRow(self.marker_style_button)
         self.add_settings(plot_box)
 
         details_box, details_layout = group_box("Sweep Details")

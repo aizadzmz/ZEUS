@@ -51,7 +51,7 @@ class ECMStep(StepPage):
         # ---------------------------------------------------------- settings
 
         self.add_display_mode_box(
-            "Plot Option",
+            "Display Option",
             "Singular shows a single sweep's fit and its circuit, "
             "stepped through with the ‹ › controls. Multiple overlays every "
             "selected sweep's fit.",

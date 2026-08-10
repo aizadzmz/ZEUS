@@ -33,6 +33,9 @@ if TYPE_CHECKING:  # names used only in annotations
 
 from gui import style
 from gui.generic_import_dialog import GenericImportDialog
+# Safe at module scope: core.plotting needs only numpy and pyqtgraph, both of
+# which gui/app.py warms before importing this module.
+from core.plotting import DEFAULT_LINE_WIDTH, DEFAULT_MARKER_SIZE
 from gui.selection import SweepSelection
 from gui.steps.base import (
     DEFAULT_SETTINGS_WIDTH,
@@ -143,6 +146,13 @@ class MainWindow(QMainWindow):
         self._ecm_shown_cdc: Optional[str] = None
         self._ecm_worker: Optional[ECMWorker] = None
         self._ecm_worker_errors: List[Tuple[str, str]] = []
+        # Marker & line style, edited through gui/marker_style_dialog.py. The
+        # per-file shapes are keyed by file_id and outlive a file being closed,
+        # so reopening it in the same session keeps its shape; a file with no
+        # entry falls back to its position in the default cycle.
+        self._file_markers: Dict[int, str] = {}
+        self._marker_size = DEFAULT_MARKER_SIZE
+        self._line_width = DEFAULT_LINE_WIDTH
         # As _pending_drt_params, plus the canonical CDC the cache key needs.
         self._pending_ecm: dict = {}
         # The editable circuit behind the canvas. Derived from the CDC field,
@@ -166,12 +176,6 @@ class MainWindow(QMainWindow):
         # redraws. Switching steps renders whichever was left dirty.
         self._pending: Optional[dict] = None
         self._step_dirty: set = set()
-        # The residual plot is the most expensive draw in the window, so it
-        # stays blank until "Plot residuals" is clicked (see
-        # gui.steps.validation_step.DEFAULT_RESIDUALS_LIMIT). Once armed it
-        # stays armed until a different file is opened, so it survives step
-        # switches and settings changes.
-        self._residuals_armed = False
         # Spectrum framing handed between steps, so Nyquist panning survives
         # moving to the next step. See _on_step_changed.
         self._spectrum_view_state = None
@@ -333,6 +337,7 @@ class MainWindow(QMainWindow):
             step.single_radio.toggled.connect(self._on_display_mode_changed)
             step.settings_width_changed.connect(self._on_settings_width_changed)
         viz.markers_radio.toggled.connect(self._refresh)
+        viz.marker_style_button.clicked.connect(self._on_marker_style_clicked)
         viz.nyquist_view_radio.toggled.connect(self._on_visual_view_changed)
 
         val = self.validation_step
@@ -348,7 +353,11 @@ class MainWindow(QMainWindow):
         # second line on the residual plot.
         val.soft_limit_spin.valueChanged.connect(self._refresh)
         val.run_validation_button.clicked.connect(self._run_validation)
-        val.residuals_plot_button.clicked.connect(self._on_plot_residuals_clicked)
+        # Rejection reads the residual definition, so switching it re-masks the
+        # stored results and redraws the plot in the new convention. Only a
+        # re-run can change what an *advanced* prune already removed, which
+        # _update_residuals_header says out loud.
+        val.residual_modulus_radio.toggled.connect(self._refresh)
 
         drt = self.drt_step
         # Redraws the measured plot with the dropped points greyed out; the
@@ -512,17 +521,55 @@ class MainWindow(QMainWindow):
 
     def _build_style_map(self) -> Dict[str, Tuple[str, str]]:
         """ds.key -> (color, pg symbol) for every loaded sweep: color by sweep
-        index, symbol by the file's position in _files."""
-        from core.plotting import PG_MARKERS, TAB10
+        index, shape by its file.
+
+        Two sweeps sharing an index within their own files share a color, so
+        the shape is what tells them apart -- it comes from the Marker & line
+        style dialog, falling back to the file's position in the default
+        cycle."""
+        from core.plotting import SERIES_COLORS, default_marker_for
 
         file_position = {lf.file_id: i for i, lf in enumerate(self._files)}
         return {
             ds.key: (
-                TAB10[ds.index % len(TAB10)],
-                PG_MARKERS[file_position.get(ds.file_id, 0) % len(PG_MARKERS)],
+                SERIES_COLORS[ds.index % len(SERIES_COLORS)],
+                self._marker_for(ds.file_id, file_position.get(ds.file_id, 0)),
             )
             for ds in self._datasets
         }
+
+    def _marker_for(self, file_id: int, position: int) -> str:
+        """A file's marker: whatever it was given in the style dialog, else the
+        shape its load position would hand it."""
+        from core.plotting import default_marker_for
+
+        return self._file_markers.get(file_id) or default_marker_for(position)
+
+    def _on_marker_style_clicked(self) -> None:
+        """The Marker & line style popup. Applies on OK only, so a cancelled
+        dialog cannot leave the plots half-restyled."""
+        from gui.marker_style_dialog import MarkerStyleDialog
+
+        file_position = {lf.file_id: i for i, lf in enumerate(self._files)}
+        dialog = MarkerStyleDialog(
+            files=[(lf.file_id, lf.stem) for lf in self._files],
+            markers={
+                lf.file_id: self._marker_for(lf.file_id, file_position[lf.file_id])
+                for lf in self._files
+            },
+            marker_size=self._marker_size,
+            line_width=self._line_width,
+            parent=self,
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        # Choices for files that have since been closed are kept: reopening one
+        # in the same session should come back with the shape it was given.
+        self._file_markers.update(dialog.markers)
+        self._marker_size = dialog.marker_size
+        self._line_width = dialog.line_width
+        self._refresh()
 
     def _selected_datasets(self) -> List:
         """Every checked sweep -- the working set that gets masked, processed
@@ -536,6 +583,25 @@ class MainWindow(QMainWindow):
             return self._selection.selected()
         ds = self._selection.current()
         return [ds] if ds is not None else []
+
+    def _apply_base_mask(self, ds) -> None:
+        """Reset ds to the mask a validation run is meant to see: the inductive
+        filter (or none at all) plus the user's own eraser edits.
+
+        Pointedly *not* the threshold pass. Those rejections are derived from a
+        result, so letting them stand as the next run's input would make a fit
+        depend on how many times Run had been clicked -- and would break the
+        replay in _refresh, which reconstructs a result's point set as this
+        base plus the run's own `pruned_points`, and reports a mismatch as a
+        stale result.
+        """
+        from core.filtering import clear_mask, mask_inductive_points
+
+        if self.validation_step.inductive_check.isChecked():
+            mask_inductive_points(ds)
+        else:
+            clear_mask(ds)
+        self._apply_manual_overrides(ds)
 
     def _apply_manual_overrides(self, ds) -> None:
         """Re-assert this sweep's eraser edits over whatever the automatic
@@ -655,8 +721,6 @@ class MainWindow(QMainWindow):
         self._manual_kept = {}
         self._running_keys = []
         self.validation_step.prune_status_label.clear()
-        # Nothing validated yet, so the residual plot starts blank.
-        self._residuals_armed = False
 
     def _load_files(self, paths: List[str], clear_first: bool) -> None:
         """Parse each path and commit to _files/_datasets, replacing if
@@ -854,6 +918,7 @@ class MainWindow(QMainWindow):
             self.validation_step.soft_limit_spin.value(),
             self.validation_step.hard_limit_spin.value(),
             self.validation_step.max_removed_spin.value(),
+            self.validation_step.residual_mode,
         )
         try:
             save_session(
@@ -936,9 +1001,14 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"Saved plot to '{Path(path).name}'.")
 
+    # The two ways the DRT can leave the app. The peaks, when they have been
+    # fitted, always follow the curve into a companion file next to it.
+    _DRT_CSV_FILTER = "DRT table (*.csv)"
+    _DRT_ZVIEW_FILTER = "ZView data file (*.z)"
+
     def _export_drt_results(self) -> None:
         """The DRT curve for the sweep on screen, plus its peaks if they have
-        been fitted."""
+        been fitted, as either CSV or the formats ZView reads."""
         title = "Export DRT results"
         ds = self._cursor_dataset(title)
         if ds is None:
@@ -950,18 +1020,33 @@ class MainWindow(QMainWindow):
             )
             return
 
-        directory = QFileDialog.getExistingDirectory(self, title)
-        if not directory:
+        from core.bdf_export import file_stem
+
+        suggested = f"{file_stem(ds)}.drt.csv"
+        path, chosen_filter = QFileDialog.getSaveFileName(
+            self,
+            title,
+            suggested,
+            f"{self._DRT_CSV_FILTER};;{self._DRT_ZVIEW_FILTER}",
+        )
+        if not path:
             return
 
-        from core.bdf_export import file_stem, write_drt, write_drt_peaks
+        # An explicit .z or .csv the user typed wins over the filter dropdown,
+        # which they may never have touched.
+        path = Path(path)
+        if path.suffix.lower() in (".z", ".csv"):
+            zview = path.suffix.lower() == ".z"
+        else:
+            zview = chosen_filter == self._DRT_ZVIEW_FILTER
+            path = path.with_suffix(".z" if zview else ".csv")
 
-        stem = Path(directory) / file_stem(ds)
+        peaks = self._drt_peaks.get(ds.key)
         try:
-            written = [write_drt(stem.with_suffix(".drt.csv"), result)]
-            peaks = self._drt_peaks.get(ds.key)
-            if peaks is not None:
-                written.append(write_drt_peaks(stem.with_suffix(".drt_peaks.csv"), peaks))
+            if zview:
+                written = self._write_drt_zview(path, ds, result, peaks)
+            else:
+                written = self._write_drt_csv(path, result, peaks)
         except Exception as exc:
             QMessageBox.critical(self, title, f"Could not export:\n{exc}")
             return
@@ -969,6 +1054,40 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(
             f"Exported {len(written)} file(s) for {self._display_label(ds)}."
         )
+
+    def _write_drt_csv(self, path: Path, result, peaks) -> list:
+        from core.bdf_export import write_drt, write_drt_peaks
+
+        written = [write_drt(path, result)]
+        if peaks is not None:
+            # path.stem is "<sweep>.drt", so this lands beside the curve as
+            # "<sweep>.drt_peaks.csv".
+            written.append(
+                write_drt_peaks(path.with_name(f"{path.stem}_peaks.csv"), peaks)
+            )
+        return written
+
+    def _write_drt_zview(self, path: Path, ds, result, peaks) -> list:
+        """The curve as a .z data file, and the peaks as the equivalent circuit
+        they imply, which ZView opens as a model to fit from."""
+        from core.zview_export import (
+            estimate_series_resistance,
+            write_drt_model,
+            write_drt_z,
+        )
+
+        written = [write_drt_z(path, result)]
+        if peaks is not None:
+            # A DRT says nothing about the ohmic resistance, so Rs is seeded
+            # from the sweep itself rather than left at zero.
+            written.append(
+                write_drt_model(
+                    path.with_suffix(".mdl"),
+                    peaks,
+                    series_resistance=estimate_series_resistance(ds),
+                )
+            )
+        return written
 
     def _export_ecm_parameters(self) -> None:
         """Every circuit fitted to the sweep on screen, with its fit curve."""
@@ -1048,8 +1167,6 @@ class MainWindow(QMainWindow):
         self._ecm_shown_cdc = None
         self._manual_masked = ui_state["manual_masked"]
         self._manual_kept = ui_state["manual_kept"]
-        # Nothing plotted yet, so the residual plot starts blank.
-        self._residuals_armed = False
 
         self._refresh_file_list_widget()
         self._populate_sweep_selectors()
@@ -1078,6 +1195,10 @@ class MainWindow(QMainWindow):
             max_removed=ui_state.get("max_removed"),
         )
         self.validation_step.set_mode(ui_state.get("validation_mode", "Basic"))
+        # None for a session saved before the convention was a setting, which
+        # leaves the widget on its default -- the one such a session was
+        # rejected under.
+        self.validation_step.set_residual_mode(ui_state.get("residual_mode"))
 
         self.statusBar().showMessage(
             f"Restored session from '{Path(path).name}' "
@@ -1176,6 +1297,15 @@ class MainWindow(QMainWindow):
         self.step_bar.set_theme_mode(self._theme_mode)
         self.data_viz_step.files_panel.set_theme_mode(self._theme_mode)
         self._settings.setValue("theme", self._theme_mode)
+        # The schematic's colors are baked into its SVG when schemdraw builds
+        # it, so no stylesheet can recolor it in place -- it has to be redrawn.
+        # Done here rather than left to _refresh() below, which returns early
+        # with no data: the circuit is tied to no sweep and stays editable
+        # before a file is ever opened. Skipped while the tree is unbuilt --
+        # the canvas is showing a message, and drawing one costs the pyimpspec
+        # import that ECMStep is careful not to pay at start-up.
+        if self._ecm_tree is not None:
+            self._render_ecm_circuits()
         # Regenerate existing figures so plot colors follow the new theme.
         if self._datasets:
             self._refresh()
@@ -1184,6 +1314,15 @@ class MainWindow(QMainWindow):
         selected = self._selected_datasets()
         if not selected:
             return
+
+        # The run reads these masks, so put them back to the filtered data
+        # first: without this each run starts from whatever the last redraw's
+        # threshold pass had removed, so re-running a sweep fits it on fewer
+        # and fewer points and `pruned_points` no longer describes the whole
+        # difference from the base. See _apply_base_mask.
+        for ds in selected:
+            self._apply_base_mask(ds)
+
         # Module-level functions, so ValidationWorker can pickle the runner by
         # reference when it spreads a batch over processes.
         from core.validation import prune_iteratively, run_kk_test, run_zhit
@@ -1217,6 +1356,7 @@ class MainWindow(QMainWindow):
             hard_percent=self.validation_step.hard_limit_spin.value(),
             soft_percent=self.validation_step.soft_limit_spin.value(),
             max_removed=self.validation_step.max_removed_spin.value(),
+            residual_mode=self.validation_step.residual_mode,
         )
 
     def _pruned_points(self, method: str, key: str) -> List[int]:
@@ -1969,22 +2109,17 @@ class MainWindow(QMainWindow):
             self._update_ecm_coverage()
             self._pending = None
             self._step_dirty.clear()
-            # _residuals_armed survives: an empty selection is a transient
-            # state on the way to a new one, not a request to blank the plot.
             self._update_residuals_header(0, 0)
             return
 
         method = self._validation_method
         threshold = self.validation_step.reject_threshold
+        residual_mode = self.validation_step.residual_mode
 
+        # Exactly what a run starts from, so the replay below lands on the same
+        # point set the stored result was fitted on.
         for ds in selected:
-            if self.validation_step.inductive_check.isChecked():
-                mask_inductive_points(ds)
-            else:
-                clear_mask(ds)
-            # Before the outlier pass as well as after, so the mask matches
-            # what a validation run observed and does not read as stale.
-            self._apply_manual_overrides(ds)
+            self._apply_base_mask(ds)
 
         stale_keys = []
         for ds in selected:
@@ -1995,7 +2130,7 @@ class MainWindow(QMainWindow):
                 # fitted on, and re-deriving them would mean re-running it.
                 mask_points(ds, self._pruned_points(method, ds.key))
                 try:
-                    mask_residual_outliers(ds, result, threshold)
+                    mask_residual_outliers(ds, result, threshold, residual_mode)
                 except ValueError:
                     stale_keys.append(ds.key)
             # Re-applied on top of the outlier pass, which only adds masks, so
@@ -2040,6 +2175,7 @@ class MainWindow(QMainWindow):
             displayed_for=displayed_for,
             method=method,
             threshold=threshold,
+            residual_mode=residual_mode,
             # Second residual line, drawn only where it means something: in
             # basic mode there is one limit, and it is `threshold`.
             soft_threshold=(
@@ -2053,36 +2189,40 @@ class MainWindow(QMainWindow):
             ecm_shown_cdc=shown_cdc,
         )
         self._step_dirty = {0, 1, 2, 3}
-        # _residuals_armed survives: the redraw waits until the Validation step
-        # is visible, so only a settings change made while looking at the
-        # residuals redraws them immediately.
-        self._render_active_step()
-
-    def _on_plot_residuals_clicked(self) -> None:
-        """Arm the residual plot and draw it. Stays armed for this file, so the
-        plot persists across step switches and settings changes."""
-        self._residuals_armed = True
-        self._step_dirty.add(1)
         self._render_active_step()
 
     def _update_residuals_header(self, shown: int, total: int) -> None:
-        """Report how much of the selection made it onto the screen."""
+        """Say what the residual plot is showing, or why it is showing nothing.
+
+        The plot is Singular-only (see _sync_display_mode_widgets), so in
+        Multiple view there is no figure to describe and only the convention
+        still applies."""
         val = self.validation_step
-        # The cap applies to Combined view only; Single draws itself.
-        combined = self._display_mode_for(1) == "Combined"
-        val.residuals_limit_spin.setEnabled(combined)
-        val.residuals_plot_button.setEnabled(combined and total > 0)
+        single = self._display_mode_for(1) == "Single"
 
         if total == 0:
             text = "No validated sweeps — run a validation first."
-        elif not combined:
-            text = "Showing the sweep on screen; page with ‹ › above."
+        elif not single:
+            # The convention still governs rejection here, so it is worth
+            # saying that the setting has not gone dead along with the plot.
+            text = (
+                f"{total} validated sweep(s). Switch to Singular for the "
+                "residual plot; the Residuals setting above still sets what "
+                "is rejected."
+            )
         elif shown == 0:
-            text = f"{total} validated sweep(s) ready."
-        elif shown < total:
-            text = f"Showing {shown} of {total}."
+            text = "Nothing validated for the sweep on screen."
         else:
-            text = f"Showing all {total}."
+            text = "Showing the sweep on screen; page with ‹ › above."
+
+        if self.validation_step.mode == "Advanced":
+            # An advanced prune's removals are baked into the stored result, so
+            # re-reading them under a new convention is not possible.
+            text += (
+                "\n\nChanging the residual definition re-rejects against the "
+                "hard limit, but what the iterative prune already removed "
+                "stands until you re-run it."
+            )
         val.residuals_status_label.setText(text)
 
     def _force_replot_spectrum(self) -> None:
@@ -2127,6 +2267,8 @@ class MainWindow(QMainWindow):
                 style=self._style,
                 show_removed=show_removed,
                 style_map=self._build_style_map(),
+                marker_size=self._marker_size,
+                line_width=self._line_width,
             )
         )
 
@@ -2214,27 +2356,23 @@ class MainWindow(QMainWindow):
 
         elif index == 1:
             self._draw_spectrum(self.validation_step.spectrum_pane, drawn, show_removed=True)
-            # Single mode draws its one residual figure straight away. The
-            # button and cap are for Combined view, which costs one figure per
-            # selected sweep.
+            # Singular draws its one residual figure straight away; Multiple
+            # collapses the pane outright (_sync_display_mode_widgets), so
+            # there is nothing to draw and one figure per selected sweep would
+            # be wasted work.
             validated = p["validated_selected"]
-            if self._display_mode_for(1) == "Single":
-                shown = validated[:1]
-            else:
-                limit = self.validation_step.residuals_limit_spin.value()
-                shown = validated[:limit] if self._residuals_armed else []
-            residual_widgets = []
+            shown = validated[:1] if self._display_mode_for(1) == "Single" else []
+            figure = None
             for ds in shown:
                 result = self._validation_results[(p["method"], ds.key)]
-                residual_widgets.append(
-                    build_residuals_plot(
-                        result,
-                        title=f"{p['method']} residuals — {self._display_label(ds)}",
-                        threshold=p["threshold"],
-                        soft_threshold=p["soft_threshold"],
-                    )
+                figure = build_residuals_plot(
+                    result,
+                    title=f"{p['method']} residuals — {self._display_label(ds)}",
+                    threshold=p["threshold"],
+                    soft_threshold=p["soft_threshold"],
+                    residual_mode=p["residual_mode"],
                 )
-            self.validation_step.residuals_pane.set_widgets(residual_widgets)
+            self.validation_step.residuals_pane.set_widget(figure)
             self._update_residuals_header(len(shown), len(validated))
 
         elif index == 2:
@@ -2265,6 +2403,8 @@ class MainWindow(QMainWindow):
                         show_removed=False,
                         style_map=self._build_style_map(),
                         fit_curves=p["ecm_curves"],
+                        marker_size=self._marker_size,
+                        line_width=self._line_width,
                     )
                 )
             else:

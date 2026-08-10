@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.figure_panes import PgFigureListPane, PgFigurePane
+from gui.figure_panes import PgFigurePane, PgSingleFigurePane
 from gui.segmented import SegmentedControl
 from gui.selection import SweepSelection
 from gui.steps.base import (
@@ -28,10 +28,6 @@ from gui.steps.base import (
     set_row_visible,
 )
 from gui.sweep_pager import SweepPager
-
-# How many residuals figures Multiple view offers to draw at once. Each is a
-# full canvas render; Singular view never exceeds one and needs no cap.
-DEFAULT_RESIDUALS_LIMIT = 5
 
 
 def _percent_spin(value: float) -> QDoubleSpinBox:
@@ -51,7 +47,7 @@ class ValidationStep(StepPage):
         # ---------------------------------------------------------- settings
 
         self.add_display_mode_box(
-            "Plot Options",
+            "Display Option",
             "Singular shows a single sweep with its own residual plot "
             "below, stepped through with the ‹ › controls. Multiple overlays "
             "every selected sweep and collapses the residuals.",
@@ -79,7 +75,11 @@ class ValidationStep(StepPage):
             "helps spectra with negative differential resistance. "
             "Z-HIT reconstructs the modulus from the phase data and is good "
             "at catching non-steady-state artifacts such as low-frequency "
-            "drift; it is also far quicker, since it does no model fitting.",
+            "drift; it is also far quicker, since it does no model fitting.\n\n"
+            "Residuals sets which convention a residual is quoted in. That is "
+            "not a display setting: the limits reject on whichever is chosen, "
+            "so the dashed limit lines on the plot always mark the points that "
+            "went.",
         )
         method = SegmentedControl(["Kramers-Kronig", "Z-HIT"])
         # Named *_radio though they are QToolButtons: same QAbstractButton
@@ -103,7 +103,11 @@ class ValidationStep(StepPage):
         self.threshold_spin = _percent_spin(2.0)
         self.threshold_spin.setToolTip(
             "Outlier threshold. Points whose relative residual (real or "
-            "imaginary) exceeds this percentage are removed."
+            "imaginary) exceeds this percentage are removed.\n\n"
+            "What counts as the relative residual is set by Residuals below.\n\n"
+            "Also frames the residual plot: the axis runs 5 points past this, "
+            "and residuals above that are pinned to the edge as 'off scale' "
+            "rather than being allowed to flatten the rest of the figure."
         )
         valid_form.addRow("Threshold [%]", self.threshold_spin)
 
@@ -121,7 +125,12 @@ class ValidationStep(StepPage):
         self.hard_limit_spin.setToolTip(
             "Points above this are removed immediately, however many there "
             "are, and re-checked on every pass. Must be at or above the soft "
-            "limit."
+            "limit.\n\n"
+            "This and the soft limit are both read under the convention set by "
+            "Residuals below.\n\n"
+            "Being the higher of the two, this one frames the residual plot: "
+            "the axis runs 5 points past it, and residuals above that are "
+            "pinned to the edge as 'off scale'."
         )
         valid_form.addRow("Hard limit [%]", self.hard_limit_spin)
 
@@ -140,17 +149,53 @@ class ValidationStep(StepPage):
         )
         valid_form.addRow("Max removed", self.max_removed_spin)
 
+        # Last of the settings the run reads, and directly under the limits it
+        # governs: whichever convention is picked here is the one they reject
+        # on, whether that is the Basic threshold or the Advanced pair above.
+        definition = SegmentedControl(["ΔZ / |Z|", "ΔZ′ / |Z′|"])
+        self.residual_modulus_radio = definition.button(0)
+        self.residual_modulus_radio.setToolTip(
+            "Both parts against the modulus: ΔZ′/|Z| and ΔZ″/|Z|.\n\n"
+            "What pyimpspec reports (Schönleber et al. 2014) and what the "
+            "exported residual CSVs contain. One scale for both parts, so a "
+            "point's real and imaginary residuals are directly comparable."
+        )
+        self.residual_component_radio = definition.button(1)
+        self.residual_component_radio.setToolTip(
+            "Each part against its own magnitude: ΔZ′/|Z′| and ΔZ″/|Z″|.\n\n"
+            "Reads the error on a part as a fraction of that part, and is "
+            "uncapped: wherever a component is small the ratio grows without "
+            "limit, so points whose real or imaginary part is not resolved "
+            "above the noise are rejected.\n\n"
+            "Expect that to bite hardest where Z″ passes through zero — "
+            "entering the inductive tail, and again as an arc closes back "
+            "onto the real axis. Far more points go than under ΔZ/|Z| at the "
+            "same percentage; the two are not on a comparable scale, so set "
+            "the limits above to suit this one.\n\n"
+            "A part measuring at or near zero gives an enormous residual. The "
+            "point is rejected, and appears on the plot as an 'off scale' "
+            "marker at the edge rather than at its own value.\n\n"
+            "Exported residual CSVs stay in the ΔZ/|Z| form either way — that "
+            "is the interchange convention."
+        )
+        valid_form.addRow("Residuals", definition)
+
         self.run_validation_button = QPushButton()
         # The one action this step exists to perform.
         self.run_validation_button.setProperty("variant", "primary")
         valid_form.addRow(self.run_validation_button)
 
-        # An output, so it sits with the action that produces it. Empty until
-        # an advanced run reports back.
+        # Outputs, so they sit below the action that produces them rather than
+        # between the settings and the button. Empty until a run reports back.
         self.prune_status_label = QLabel()
         self.prune_status_label.setWordWrap(True)
         self.prune_status_label.setProperty("state", "muted")
         valid_form.addRow(self.prune_status_label)
+
+        self.residuals_status_label = QLabel()
+        self.residuals_status_label.setWordWrap(True)
+        self.residuals_status_label.setProperty("state", "muted")
+        valid_form.addRow(self.residuals_status_label)
         self.add_settings(valid_box)
 
         self.basic_radio.toggled.connect(self._sync_mode_rows)
@@ -161,28 +206,6 @@ class ValidationStep(StepPage):
         self.soft_limit_spin.valueChanged.connect(self.hard_limit_spin.setMinimum)
         self.hard_limit_spin.valueChanged.connect(self.soft_limit_spin.setMaximum)
         self._clamp_limits()
-
-        residuals_box, residuals_form = group_form("Residual Plot")
-        self.residuals_limit_spin = QSpinBox()
-        self.residuals_limit_spin.setMinimum(1)
-        self.residuals_limit_spin.setMaximum(50)
-        self.residuals_limit_spin.setValue(DEFAULT_RESIDUALS_LIMIT)
-        self.residuals_limit_spin.setToolTip(
-            "How many residual figures to draw at once. Only applies in "
-            "Multiple view — Singular never exceeds one, so it draws itself "
-            "with no trigger."
-        )
-        residuals_form.addRow("Show at most", self.residuals_limit_spin)
-
-        self.residuals_plot_button = QPushButton("Plot residuals")
-        self.residuals_plot_button.setProperty("variant", "secondary")
-        residuals_form.addRow(self.residuals_plot_button)
-
-        self.residuals_status_label = QLabel()
-        self.residuals_status_label.setWordWrap(True)
-        self.residuals_status_label.setProperty("state", "muted")
-        residuals_form.addRow(self.residuals_status_label)
-        self.add_settings(residuals_box)
 
         export_box, export_layout = quiet_group()
         self.export_image_button = QPushButton("Save spectrum as image…")
@@ -206,15 +229,15 @@ class ValidationStep(StepPage):
         lower_col.setSpacing(0)
         self.pager = SweepPager(selection)
         lower_col.addWidget(self.pager)
-        self.residuals_pane = PgFigureListPane()
+        self.residuals_pane = PgSingleFigurePane()
         lower_col.addWidget(self.residuals_pane, stretch=1)
         self.splitter.addWidget(lower)
 
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
-        # Pixels, not ratios -- setSizes takes real heights. The residuals
-        # list asks for a tall minimum (one 340px figure per sweep), so
-        # anything smaller opens with the spectrum crushed to a sliver.
+        # Pixels, not ratios -- setSizes takes real heights. Only the opening
+        # split: the residual figure claims no minimum of its own, so dragging
+        # the handle resizes it rather than pushing it under a scrollbar.
         self.splitter.setSizes([560, 380])
         self.splitter.setChildrenCollapsible(False)
         self.add_content(self.splitter, stretch=1)
@@ -240,6 +263,34 @@ class ValidationStep(StepPage):
             if self.mode == "Basic"
             else self.hard_limit_spin.value()
         )
+
+    @property
+    def residual_mode(self) -> str:
+        """One of core.validation.RESIDUAL_MODES: what the limits above and the
+        residual plot below both measure a point against."""
+        # Deferred: core.validation drags in pyimpspec, and this step is built
+        # during startup, before any analysis has been asked for.
+        from core.validation import RESIDUAL_BY_COMPONENT, RESIDUAL_BY_MODULUS
+
+        return (
+            RESIDUAL_BY_MODULUS
+            if self.residual_modulus_radio.isChecked()
+            else RESIDUAL_BY_COMPONENT
+        )
+
+    def set_residual_mode(self, mode: Optional[str]) -> None:
+        """Restore the convention without emitting -- for a session load, whose
+        one _refresh() at the end covers every widget it touched."""
+        from core.validation import RESIDUAL_BY_COMPONENT
+
+        if mode is None:
+            return
+        buttons = (self.residual_modulus_radio, self.residual_component_radio)
+        for button in buttons:
+            button.blockSignals(True)
+        buttons[1 if mode == RESIDUAL_BY_COMPONENT else 0].setChecked(True)
+        for button in buttons:
+            button.blockSignals(False)
 
     def _clamp_limits(self) -> None:
         """Pen each of the two limits in on the other's current value."""
