@@ -33,7 +33,9 @@ drt_peaks = {dataset.key: peaks_result}
 
 manual_masked = {dataset.key: {3, 7}}
 manual_kept = {dataset.key: {0}}
-ui_state = ui_state_to_dict(manual_masked, manual_kept, "kk", True, 2.5)
+ui_state = ui_state_to_dict(
+    manual_masked, manual_kept, "kk", True, 2.5, residual_mode="component"
+)
 
 path = "test/data/_session_roundtrip_tmp.eisz"
 save_session(
@@ -113,6 +115,9 @@ assert loaded_ui_state["manual_kept"][dataset.key] == manual_kept[dataset.key]
 assert loaded_ui_state["validation_method"] == "kk"
 assert loaded_ui_state["inductive_filter"] is True
 assert loaded_ui_state["residual_threshold"] == 2.5
+# The convention decides which points a stored result rejects, so a reloaded
+# session has to come back on the one it was saved under.
+assert loaded_ui_state["residual_mode"] == "component"
 print("ui_state round-trip OK, manual_masked =", loaded_ui_state["manual_masked"][dataset.key])
 
 # --- backward compatibility: a v1 (plain-JSON, no params/ui_state) session still loads ---

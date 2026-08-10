@@ -1,9 +1,14 @@
-"""The iterative prune's control flow, driven by a stub runner.
+"""The iterative prune's control flow, and the two residual conventions.
 
-No real Kramers-Kronig fit here on purpose: the loop's job is deciding which
-point to drop and when to stop, and a stub makes every one of those decisions
-observable and deterministic.
+No real Kramers-Kronig fit for the prune on purpose: the loop's job is deciding
+which point to drop and when to stop, and a stub makes every one of those
+decisions observable and deterministic. The one real fit at the bottom is there
+to pin what pyimpspec stores on a result, which the COMPONENT convention reads.
 """
+import os
+
+# Must precede any Qt import; core.plotting is read for its series names below.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 from pyimpspec import DataSet
@@ -11,8 +16,14 @@ from pyimpspec import DataSet
 from core.io_utils import EISDataset
 from core.validation import (
     MIN_POINTS_AFTER_PRUNE,
+    RESIDUAL_BY_COMPONENT,
+    RESIDUAL_BY_MODULUS,
+    RESIDUAL_MODES,
+    _measured_impedances,
+    _relative_to,
     mask_residual_outliers,
     prune_iteratively,
+    relative_residuals,
     residual_deviations,
     unmasked_indices,
 )
@@ -131,5 +142,179 @@ assert residual_deviations(result)[18] == 4.0
 mask_residual_outliers(ds, result, 2.0)
 assert unmasked_indices(ds) == [i for i in range(20) if i != 18]
 print("mask_residual_outliers OK: dropped index 18")
+
+
+# =========================== residual conventions ===========================
+
+class FitResult:
+    """Carries what relative_residuals reads off a real validation result: the
+    fit, pyimpspec's complex residuals, and its percent view of them."""
+
+    def __init__(self, freq, Z_exp, Z_fit):
+        self.frequencies = np.asarray(freq, dtype=float)
+        self.impedances = np.asarray(Z_fit)
+        # Schoenleber et al. 2014, eqs. 15-16 -- what pyimpspec stores.
+        self.residuals = (np.asarray(Z_exp) - self.impedances) / np.abs(Z_exp)
+
+    def get_residuals_data(self):
+        return self.frequencies, self.residuals.real * 100, self.residuals.imag * 100
+
+
+def offset_fit(Z_exp, fraction=0.01):
+    """A fit sitting `fraction` of |Z| away from the data, on both parts."""
+    Z_exp = np.asarray(Z_exp)
+    return Z_exp - fraction * np.abs(Z_exp) * (1 + 1j)
+
+
+# --- Z_exp is recoverable from the fit and the residuals alone ---
+freq = np.logspace(5, -1, 12)
+Z_exp = 10 + 50 / (1 + 1j * 2 * np.pi * freq * 5e-3) + 1 / (1j * 2 * np.pi * freq * 0.5)
+result = FitResult(freq, Z_exp, offset_fit(Z_exp))
+assert np.allclose(_measured_impedances(result), Z_exp), "modulus recovery drifted"
+print("Z_exp recovery OK: exact to", float(np.abs(_measured_impedances(result) - Z_exp).max()))
+
+# --- COMPONENT is MODULUS rescaled by |Z| / |Z_component| ---
+# A point well clear of both axes, where the two conventions stay comparable.
+Z_exp = np.array([100 + 60j])
+result = FitResult([1.0], Z_exp, offset_fit(Z_exp))
+_, mod_re, mod_im = relative_residuals(result, RESIDUAL_BY_MODULUS)
+_, comp_re, comp_im = relative_residuals(result, RESIDUAL_BY_COMPONENT)
+modulus = float(np.abs(Z_exp[0]))
+assert np.allclose(comp_re, mod_re * modulus / 100.0)
+assert np.allclose(comp_im, mod_im * modulus / 60.0)
+# The imaginary part is the smaller one, so it is the one that reads worse.
+assert abs(comp_im[0]) > abs(comp_re[0]) > abs(mod_re[0])
+print(f"component rescaling OK: {mod_im[0]:.3f}% by |Z| -> {comp_im[0]:.3f}% by |Z''|")
+
+# --- A small component is amplified without limit: no cap ---
+# Z'' at 0.001% of |Z| reads as a residual in the tens of thousands of percent,
+# which is the point -- that component is not resolved, so the point goes.
+Z_exp = np.array([100 + 0.001j])
+result = FitResult([1.0], Z_exp, offset_fit(Z_exp))
+_, mod_re, mod_im = relative_residuals(result, RESIDUAL_BY_MODULUS)
+_, comp_re, comp_im = relative_residuals(result, RESIDUAL_BY_COMPONENT)
+assert np.allclose(comp_im, mod_im * 100.0 / 0.001), comp_im
+assert abs(comp_im[0]) > 1e5, comp_im
+print(f"uncapped OK: {mod_im[0]:.3f}% by |Z| -> {comp_im[0]:,.0f}% by |Z''|")
+
+# --- A measured part of zero, with an error: rejected, whatever it reports ---
+# Z_exp is reconstructed arithmetically, so an exact 0j comes back as a ~1e-16
+# residue rather than a true zero, and the ratio is astronomic-but-finite. The
+# outcome that matters is the same either way: the point goes.
+Z_exp = np.array([100 + 0j])
+result = FitResult([1.0], Z_exp, offset_fit(Z_exp))  # fit misses on both parts
+_, comp_re, comp_im = relative_residuals(result, RESIDUAL_BY_COMPONENT)
+assert abs(comp_im[0]) > 1e12, comp_im
+assert abs(comp_re[0]) < 10, comp_re  # Z' is 100, unaffected
+ds = EISDataset(DataSet(frequencies=[1.0], impedances=Z_exp), index=0, source_file="stub")
+mask_residual_outliers(ds, result, 2.0, RESIDUAL_BY_COMPONENT)
+assert unmasked_indices(ds) == [], "an unresolved component must be rejected"
+print(f"zero-ish denominator OK: {comp_im[0]:.1e}% -> rejected")
+
+# --- _relative_to's own contract, at a denominator that really is 0.0 ---
+# Reached when the arithmetic lands on a hard zero rather than a residue. Both
+# cases are decided rather than left to float semantics.
+signed = _relative_to(np.array([2.0, -2.0]), np.array([0.0, 0.0]))
+assert np.isinf(signed).all() and signed[0] > 0 > signed[1], signed
+# 0/0 is NaN by default, and NaN fails every > comparison -- the point would be
+# silently *kept*. A perfectly fitted point is not an outlier, so: 0.0.
+exact = _relative_to(np.array([0.0]), np.array([0.0]))
+assert exact[0] == 0.0 and not np.isnan(exact[0]), exact
+print("_relative_to OK: x/0 -> +-inf, 0/0 -> 0.0")
+
+# --- An infinite deviation is rejected; a zero one is kept ---
+class _Inf(FitResult):
+    def get_residuals_data(self):
+        return self.frequencies, np.array([0.0, 0.0]), np.array([np.inf, 0.0])
+
+
+result = _Inf([1.0, 2.0], np.array([1 + 1j, 1 + 1j]), np.array([1 + 1j, 1 + 1j]))
+devs = residual_deviations(result, RESIDUAL_BY_MODULUS)
+assert devs[0] == float("inf") and devs[1] == 0.0, devs
+ds = EISDataset(
+    DataSet(frequencies=[1.0, 2.0], impedances=np.array([1 + 1j, 1 + 1j])),
+    index=0, source_file="stub",
+)
+mask_residual_outliers(ds, result, 2.0, RESIDUAL_BY_MODULUS)
+assert unmasked_indices(ds) == [1], unmasked_indices(ds)
+print("infinite deviation OK: rejected; a zero one kept")
+
+# --- Rejection follows the convention, not just the plot ---
+# 1% of |Z| off on both parts. |Z''| is a fifth of |Z|, so the imaginary
+# residual reads ~5% against its own part: inside a 2% threshold under MODULUS,
+# outside it under COMPONENT.
+freq = np.logspace(3, 0, 20)
+Z_exp = np.full(20, 100 + 20j, dtype=complex)
+Z_fit = Z_exp.copy()
+Z_fit[7] = offset_fit(Z_exp[7:8])[0]  # one bad point; the rest fit perfectly
+result = FitResult(freq, Z_exp, Z_fit)
+
+assert residual_deviations(result, RESIDUAL_BY_MODULUS)[7] < 2.0
+assert residual_deviations(result, RESIDUAL_BY_COMPONENT)[7] > 2.0
+
+for mode, expected in ((RESIDUAL_BY_MODULUS, list(range(20))),
+                       (RESIDUAL_BY_COMPONENT, [i for i in range(20) if i != 7])):
+    ds = EISDataset(DataSet(frequencies=freq, impedances=Z_exp), index=0, source_file="stub")
+    mask_residual_outliers(ds, result, 2.0, mode)
+    assert unmasked_indices(ds) == expected, (mode, unmasked_indices(ds))
+print("convention drives rejection OK: point 7 survives |Z|, fails |Z''|")
+
+# --- ...including inside the prune loop ---
+ds = make_dataset(20)
+runner, seen = make_runner(ds, [0.1] * 20)  # deviations the stub reports as-is
+outcome = prune_iteratively(
+    ds, runner, hard_percent=5.0, soft_percent=2.0, max_removed=10,
+    residual_mode=RESIDUAL_BY_MODULUS,
+)
+assert outcome.removed == [], outcome.removed
+print("prune_iteratively takes a residual_mode OK")
+
+# --- An unknown convention is rejected rather than silently defaulted ---
+try:
+    relative_residuals(result, "by-eye")
+except ValueError as exc:
+    print("unknown mode rejected OK:", exc)
+else:
+    raise AssertionError("expected a ValueError for an unknown residual mode")
+
+# --- Every mode has a name to plot under ---
+# core.plotting spells the keys out rather than importing them (pyimpspec is
+# slow to load); this is the guard that keeps the two lists together.
+from core.plotting import _RESIDUAL_SERIES_NAMES
+
+assert set(_RESIDUAL_SERIES_NAMES) == set(RESIDUAL_MODES), _RESIDUAL_SERIES_NAMES
+print("plot series names cover every mode OK:", sorted(_RESIDUAL_SERIES_NAMES))
+
+# --- What a real pyimpspec result stores is what the recovery assumes ---
+# The one place this suite touches a genuine fit: the COMPONENT convention is
+# built on `.impedances` being the fit and `.residuals` being (Z_exp-Z_fit)/|Z|,
+# so an upgrade that changes either should fail here and not in the GUI.
+from core.validation import run_kk_test, run_zhit
+
+freq = np.logspace(4, -1, 25)
+w = 2 * np.pi * freq
+Z_true = 10 + 50 / (1 + 1j * w * 5e-3)
+rng = np.random.default_rng(0)
+measured = Z_true * (1 + rng.normal(0, 0.004, Z_true.shape))
+ds = EISDataset(DataSet(frequencies=freq, impedances=measured), index=0, source_file="stub")
+
+# Both methods the step offers: Z-HIT reconstructs the modulus rather than
+# fitting a circuit, but stores the same three fields.
+for name, run in (("KK", run_kk_test), ("Z-HIT", run_zhit)):
+    result = run(ds)
+    recovered = _measured_impedances(result)
+    error = float(
+        np.abs(recovered - ds.data.get_impedances()).max() / np.abs(measured).max()
+    )
+    assert error < 1e-12, (name, error)
+    # And the modulus convention is still pyimpspec's own numbers, untouched.
+    _, mod_re, mod_im = relative_residuals(result, RESIDUAL_BY_MODULUS)
+    assert np.array_equal(mod_re, result.get_residuals_data()[1])
+    assert np.array_equal(mod_im, result.get_residuals_data()[2])
+    # Measured data never lands a part on exactly 0.0, so the component view
+    # is large near the axes but finite.
+    _, comp_re, comp_im = relative_residuals(result, RESIDUAL_BY_COMPONENT)
+    assert np.isfinite(comp_re).all() and np.isfinite(comp_im).all(), name
+    print(f"real {name} result OK: Z_exp recovered to {error:.1e} relative")
 
 print("\nAll validation tests passed.")

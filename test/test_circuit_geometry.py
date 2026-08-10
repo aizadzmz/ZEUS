@@ -113,7 +113,7 @@ def test_editor_drawing_matches_the_preview_picture():
 
 
 def test_fitted_values_can_annotate_the_editor_drawing():
-    from test.test_circuit_diagram import dataset
+    from test_circuit_diagram import dataset
 
     from core.ecm import run_ecm_fit
 
