@@ -10,26 +10,36 @@ def clear_mask(dataset) -> None: #re-add the inductive points
     dataset.data.set_mask({})
 
 
+def detached_copy(dataset):
+    """A copy of an EISDataset that no longer shares its point data, so masking
+    one leaves the other alone.
+
+    The copy keeps the original's index and file, and so its key: results
+    computed from it still file under the sweep it came from."""
+    from copy import deepcopy
+
+    from core.io_utils import EISDataset
+
+    return EISDataset(
+        deepcopy(dataset.data), dataset.index, dataset.source_file, dataset.file_id
+    )
+
+
 def inductive_tail_removed(dataset):
     """A detached copy of an EISDataset with the inductive tail (Im(Z) > 0)
     masked on top of whatever is already masked.
 
     A copy rather than an in-place mask, unlike mask_inductive_points: this is
     a per-analysis filter, and the shared mask is what validation results are
-    checked against, so moving it would mark them stale. The copy keeps the
-    original's key, so results still file under the right sweep."""
-    from copy import deepcopy
-
-    from core.io_utils import EISDataset
-
-    data = deepcopy(dataset.data)
-    Z = data.get_impedances(masked=None)  # all points, incl. masked
+    checked against, so moving it would mark them stale."""
+    filtered = detached_copy(dataset)
+    Z = filtered.data.get_impedances(masked=None)  # all points, incl. masked
     inductive = {i: True for i, z in enumerate(Z) if z.imag > 0}
     # Guarded: set_mask({}) means "unmask everything", so an empty dict here
     # would hand back a copy with the original's masking undone.
     if inductive:
-        data.set_mask(inductive)
-    return EISDataset(data, dataset.index, dataset.source_file, dataset.file_id)
+        filtered.data.set_mask(inductive)
+    return filtered
 
 
 def mask_points(dataset, indices) -> None:

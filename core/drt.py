@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 # lets the GUI read the option tuples while building its sidebar without
 # paying ~4 s for pyimpspec (scipy.signal, sympy); see core/__init__.py.
 if TYPE_CHECKING:
-    from pyimpspec.analysis.drt import BHTResult, TRRBFResult
+    from pyimpspec.analysis.drt import TRRBFResult
     from pyimpspec.analysis.drt.peak_analysis import DRTPeaks
 
 RBF_TYPES = (
@@ -84,34 +84,6 @@ def run_drt(
         credible_intervals=credible_intervals,
         num_samples=num_samples,
         timeout=timeout,
-        num_procs=num_procs,
-    )
-
-
-def run_drt_bht(
-    dataset,
-    rbf_type: str = "gaussian",
-    derivative_order: int = 1,
-    rbf_shape: str = "fwhm",
-    shape_coeff: float = 0.5,
-    num_samples: int = 2000,
-    num_attempts: int = 10,
-    maximum_symmetry: float = 0.5,
-    num_procs: int = -1,
-) -> BHTResult:
-    """Compute the DRT via the Bayesian Hilbert Transform, which also scores
-    real/imaginary consistency. Returns (tau, gamma_re, gamma_im)."""
-    from pyimpspec.analysis.drt import calculate_drt_bht
-
-    return calculate_drt_bht(
-        dataset.data,
-        rbf_type=rbf_type,
-        derivative_order=derivative_order,
-        rbf_shape=rbf_shape,
-        shape_coeff=shape_coeff,
-        num_samples=num_samples,
-        num_attempts=num_attempts,
-        maximum_symmetry=maximum_symmetry,
         num_procs=num_procs,
     )
 

@@ -23,13 +23,17 @@ ValidationResult = Union[KramersKronigResult, ZHITResult]
 MIN_POINTS_AFTER_PRUNE = 8
 
 # How a residual is made relative. Both conventions are in use, and they
-# disagree by the factor |Z| / |Z_component|:
+# disagree by the factor |Z| / Z_component:
 #
 #   MODULUS   -- DZ'/|Z| and DZ''/|Z|, what pyimpspec reports (Schoenleber et
 #                al. 2014, eqs. 15-16). One common scale for both parts, so a
 #                point's two residuals are directly comparable.
-#   COMPONENT -- DZ'/|Z'| and DZ''/|Z''|, each part against its own magnitude:
-#                the error on that part as a fraction of that part.
+#   COMPONENT -- DZ'/Z' and DZ''/Z'', each part against its own signed value:
+#                the error on that part as a fraction of that part. Because the
+#                denominator carries Z'''s sign, the imaginary series comes out
+#                mirrored relative to MODULUS on a capacitive sweep. That is
+#                the convention RelaxIS reports and the ordinary definition of
+#                a relative error; see relative_residuals.
 #
 # This is not display-only. The threshold, soft and hard limits reject on
 # whichever convention is chosen, so the limit lines drawn across the residual
@@ -104,28 +108,48 @@ def relative_residuals(
     if mode == RESIDUAL_BY_MODULUS:
         return freq, res_re, res_im
 
-    # Both conventions share a numerator, so rescaling by |Z| / |Z_component|
-    # is all that separates them.
+    # Both conventions share a numerator, so rescaling by |Z| / Z_component is
+    # all that separates them.
+    #
+    # The denominator is signed, not |Z_component|. Z'' is negative across a
+    # capacitive sweep, so taking its magnitude here would mirror the whole
+    # imaginary series about zero -- same numbers, opposite sign, and no longer
+    # comparable point-for-point with RelaxIS, which divides by the signed
+    # component. Sign never reaches rejection either way (residual_deviations
+    # takes absolute values), so this is a plot- and export-facing choice.
     Z_exp = _measured_impedances(result)
     modulus = np.abs(Z_exp)
     return (
         freq,
-        _relative_to(res_re * modulus, np.abs(Z_exp.real)),
-        _relative_to(res_im * modulus, np.abs(Z_exp.imag)),
+        _relative_to(res_re * modulus, Z_exp.real),
+        _relative_to(res_im * modulus, Z_exp.imag),
     )
 
 
 def run_kk_test(
     dataset,
     *,
+    test: str = "complex",
     admittance: bool = False,
     num_F_ext_evaluations: int = 10,
     **kwargs,
 ) -> KramersKronigResult:
     """Run pyimpspec's linear Kramers-Kronig test on the unmasked points.
-    Narrows two defaults: admittance=False, num_F_ext_evaluations=10."""
+    Narrows three defaults: test="complex", admittance=False,
+    num_F_ext_evaluations=10.
+
+    pyimpspec defaults to test="real", which fits the RC amplitudes to Z' alone
+    and leaves only the series L and C to absorb any imaginary-part misfit. Z'
+    is then the fitted quantity and Z'' a byproduct, so the two residual series
+    are not comparably trustworthy: against a RelaxIS reference on the same
+    sweep, the real fit tracks Z' to r = 0.96 but never gets Z'' past r = 0.84
+    at any number of RC elements, while the complex fit reaches r = 1.00 and
+    0.999. Both parts are fitted here, and it costs nothing -- the complex
+    solve timed marginally faster than the real one.
+    """
     return perform_kramers_kronig_test(
         dataset.data,
+        test=test,
         admittance=admittance,
         num_F_ext_evaluations=num_F_ext_evaluations,
         **kwargs,

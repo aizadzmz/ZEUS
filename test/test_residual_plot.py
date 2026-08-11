@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from PySide6.QtWidgets import QApplication
 
-from core.plotting import build_residuals_plot
+from core.plotting import _residual_text, build_residuals_plot, point_tip
 from core.validation import RESIDUAL_BY_COMPONENT, RESIDUAL_BY_MODULUS
 from gui.figure_panes import PgSingleFigurePane
 
@@ -75,7 +75,7 @@ def test_series_are_named_for_the_convention(app):
     modulus = _series(build_residuals_plot(_result(), residual_mode=RESIDUAL_BY_MODULUS))
     component = _series(build_residuals_plot(_result(), residual_mode=RESIDUAL_BY_COMPONENT))
     assert "ΔZ' / |Z|" in modulus and "ΔZ'' / |Z|" in modulus
-    assert "ΔZ' / |Z'|" in component and "ΔZ'' / |Z''|" in component
+    assert "ΔZ' / Z'" in component and "ΔZ'' / Z''" in component
 
 
 def test_the_axis_is_framed_on_the_highest_limit(app):
@@ -194,7 +194,7 @@ def test_the_drawn_curve_breaks_at_the_off_scale_point(app):
     widget = build_residuals_plot(
         _result(zero_imag_at=7), threshold=2.0, residual_mode=RESIDUAL_BY_COMPONENT
     )
-    _, y = _series(widget)["ΔZ'' / |Z''|"].getData()
+    _, y = _series(widget)["ΔZ'' / Z''"].getData()
     high = _y_range(widget)[1]
     assert np.isnan(y[7]), y[7]
     # Whatever survived is on scale; NaN elsewhere is another pinned point.
@@ -229,11 +229,157 @@ def test_the_wheel_rescales_y_and_leaves_frequency_alone(app):
     assert (ny1 - ny0) == pytest.approx((y1 - y0) * 0.5), "y did not rescale"
 
 
+class _Wheel:
+    """The three members _SymmetricYViewBox.wheelEvent reads off a real
+    QGraphicsSceneWheelEvent, which cannot be constructed outside a scene."""
+
+    def __init__(self, delta):
+        self._delta = delta
+        self.accepted = False
+        self.ignored = False
+
+    def delta(self):
+        return self._delta
+
+    def accept(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.ignored = True
+
+
+def test_the_wheel_stretches_about_the_zero_line(app):
+    """Anchored on y = 0, not on the cursor: the limit lines have to stay a
+    matched distance above and below however far the scale is stretched."""
+    widget = build_residuals_plot(_benign(), threshold=2.0,
+                                  residual_mode=RESIDUAL_BY_MODULUS)
+    view_box = widget.getPlotItem().getViewBox()
+
+    for delta in (120, -120, 360):
+        view_box.wheelEvent(_Wheel(delta))
+        low, high = _y_range(widget)
+        assert low == pytest.approx(-high), (delta, low, high)
+
+    # ...and it is a real zoom, not a no-op that happens to stay centred.
+    before = _y_range(widget)[1]
+    view_box.wheelEvent(_Wheel(240))
+    assert _y_range(widget)[1] < before
+
+
+def test_the_wheel_still_leaves_frequency_alone(app):
+    widget = build_residuals_plot(_benign(), threshold=2.0,
+                                  residual_mode=RESIDUAL_BY_MODULUS)
+    view_box = widget.getPlotItem().getViewBox()
+    x_before = view_box.viewRange()[0]
+
+    event = _Wheel(120)
+    view_box.wheelEvent(event)
+
+    assert view_box.viewRange()[0] == pytest.approx(x_before)
+    assert event.accepted and not event.ignored
+
+
+def test_the_bottom_axis_wheel_is_ignored(app):
+    """axis=0 is the frequency axis' own handler; x is masked out, so there is
+    nothing for it to scale and the event must pass on."""
+    widget = build_residuals_plot(_benign(), threshold=2.0,
+                                  residual_mode=RESIDUAL_BY_MODULUS)
+    view_box = widget.getPlotItem().getViewBox()
+    x_before, y_before = view_box.viewRange()
+
+    event = _Wheel(120)
+    view_box.wheelEvent(event, axis=0)
+
+    assert event.ignored and not event.accepted
+    x_after, y_after = view_box.viewRange()
+    assert x_after == pytest.approx(x_before)
+    assert y_after == pytest.approx(y_before)
+
+
 def test_the_right_click_menu_stays_off(app):
     """The wheel is the only navigation offered; the menu would put x back."""
     widget = build_residuals_plot(_benign(), threshold=2.0,
                                   residual_mode=RESIDUAL_BY_MODULUS)
     assert not widget.getPlotItem().getViewBox().menuEnabled()
+
+
+# -- point metadata ---------------------------------------------------------
+def _tips(widget):
+    """Every hoverable series' per-point payloads, keyed by series name.
+
+    Off the scatter's parent PlotDataItem: the name is set on the item plot()
+    returns, and the scatter inside it is what carries the payloads."""
+    return {
+        item.parentItem().name(): list(item.data["data"])
+        for item in widget.interactive_items
+    }
+
+
+def test_every_series_is_hoverable_and_carries_a_payload(app):
+    widget = build_residuals_plot(_benign(), threshold=2.0, label="Set 01",
+                                 residual_mode=RESIDUAL_BY_MODULUS)
+    items = widget.interactive_items
+    assert len(items) == 2  # nothing off scale on a benign sweep
+    for item in items:
+        assert item.opts["hoverable"], item.name()
+        # One payload per plotted point, or the tips would be off by one.
+        assert len(item.data["data"]) == len(f_benign)
+
+
+def test_a_point_reports_its_sweep_frequency_and_both_parts(app):
+    widget = build_residuals_plot(_benign(), threshold=2.0, label="Set 01",
+                                 residual_mode=RESIDUAL_BY_MODULUS)
+    data = _tips(widget)["ΔZ' / |Z|"][3]
+    text = point_tip(data)
+
+    assert text.startswith("Set: Set 01\n")
+    assert f"Freq: {f_benign[3]:.4g} Hz" in text
+    # Both parts, as on the Bode plot: a real residual means little without
+    # the imaginary one beside it.
+    assert "ΔZ' / |Z|: " in text and "ΔZ'' / |Z|: " in text
+    assert text.count("%") == 2
+
+
+def test_the_tip_is_named_for_the_convention(app):
+    widget = build_residuals_plot(_benign(), threshold=2.0,
+                                 residual_mode=RESIDUAL_BY_COMPONENT)
+    text = point_tip(_tips(widget)["ΔZ' / Z'"][3])
+    assert "ΔZ' / Z': " in text and "ΔZ'' / Z'': " in text
+
+
+def test_the_label_falls_back_to_the_title(app):
+    widget = build_residuals_plot(_benign(), threshold=2.0, title="K-K — Set 07")
+    assert point_tip(_tips(widget)["ΔZ' / |Z|"][0]).startswith("Set: K-K — Set 07")
+
+
+def test_an_off_scale_point_says_so_and_still_reports_its_value(app):
+    """Its marker sits at a made-up y, so the box is the only place the real
+    number can be read."""
+    widget = build_residuals_plot(
+        _with_outlier(20.0), threshold=2.0, label="Set 01",
+        residual_mode=RESIDUAL_BY_MODULUS,
+    )
+    off = _tips(widget)["off scale"]
+    assert len(off) == 1
+    text = point_tip(off[0])
+    assert text.startswith("Set: Set 01 (off scale)")
+    assert "20" in text.split("\n")[2]  # the real residual, not the pinned y
+
+
+def test_an_unusable_residual_reads_as_a_word_not_a_number(app):
+    """core.validation._relative_to hands back a signed infinity for a point
+    whose component measured a hard zero; '1e+308 %' would say nothing."""
+    assert _residual_text(np.inf) == "+∞ %"
+    assert _residual_text(-np.inf) == "−∞ %"
+    assert _residual_text(np.nan) == "n/a"
+    assert _residual_text(-0.51234) == "-0.5123 %"
+
+
+def test_a_drawn_point_is_not_marked_off_scale(app):
+    widget = build_residuals_plot(_benign(), threshold=2.0,
+                                 residual_mode=RESIDUAL_BY_MODULUS)
+    for data in _tips(widget)["ΔZ' / |Z|"]:
+        assert "(off scale)" not in point_tip(data)
 
 
 # -- the pane the figure lives in -------------------------------------------
@@ -256,6 +402,140 @@ def test_the_pane_never_forces_a_scrollbar(app):
     QApplication.processEvents()
     assert pane.minimumSizeHint().height() <= 90
     assert figure.height() <= 90
+
+
+def _shown_pane(width=760, height=300, **kwargs):
+    pane = PgSingleFigurePane()
+    pane.resize(width, height)
+    pane.show()
+    QApplication.processEvents()
+    pane.set_widget(build_residuals_plot(
+        _benign(), threshold=2.0, label="Set 01",
+        residual_mode=RESIDUAL_BY_MODULUS, **kwargs,
+    ))
+    QApplication.processEvents()
+    QApplication.processEvents()
+    return pane
+
+
+def _plot_area(pane):
+    return pane._widget.getPlotItem().getViewBox().sceneBoundingRect()
+
+
+def _card_rect(pane):
+    item = pane._tooltip_item
+    return item.mapRectToScene(item.boundingRect())
+
+
+def _assert_inside(pane, where=""):
+    card, area = _card_rect(pane), _plot_area(pane)
+    assert card.left() >= area.left() - 1, (where, card, area)
+    assert card.right() <= area.right() + 1, (where, card, area)
+    assert card.top() >= area.top() - 1, (where, card, area)
+    assert card.bottom() <= area.bottom() + 1, (where, card, area)
+
+
+class _Hover:
+    """A pyqtgraph hover event, which cannot be constructed outside a scene.
+    Dispatched straight to the item, so this goes through ScatterPlotItem's own
+    hit test -- the part that does nothing unless `hoverable` was set."""
+
+    def __init__(self, pos=None):
+        self.exit = pos is None
+        self._pos = pos
+
+    def pos(self):
+        return self._pos
+
+
+def test_hovering_a_residual_point_shows_its_box(app):
+    """End to end: the series' sigHovered has to reach the pane, which is what
+    interactive_items and the hoverable flag are between them for."""
+    pane = _shown_pane()
+    scatter = pane._widget.interactive_items[0]
+
+    scatter.hoverEvent(_Hover(scatter.points()[3].pos()))
+    QApplication.processEvents()
+    assert pane._pending_hover is not None
+    assert pane._tooltip_item is None, "shown without waiting out the delay"
+
+    pane._show_pending_hover()  # what the hover timer fires
+    QApplication.processEvents()
+    assert pane._tooltip_item is not None
+    assert "Set: Set 01" in pane._tooltip_item.toPlainText()
+
+    # Hovering off the series takes it away again.
+    scatter.hoverEvent(_Hover())
+    QApplication.processEvents()
+    assert pane._tooltip_item is None
+
+
+def test_clicking_a_residual_point_pins_its_box(app):
+    pane = _shown_pane()
+    scatter = pane._widget.interactive_items[0]
+    pane._on_point_clicked(scatter, [scatter.points()[3]], None)
+    QApplication.processEvents()
+    assert pane._pinned and pane._tooltip_item is not None
+
+    # Pinned, so a hover elsewhere leaves it alone...
+    pane._on_point_hovered(scatter, [], None)
+    assert pane._tooltip_item is not None
+
+    # ...until a click misses every point.
+    class _Miss:
+        def isAccepted(self):
+            return False
+
+    pane._on_scene_clicked(_Miss())
+    assert not pane._pinned and pane._tooltip_item is None
+
+
+def test_the_box_is_not_clipped_at_any_corner(app):
+    """The pane is short and has a legend column, so every edge is close."""
+    pane = _shown_pane()
+    (x0, x1), (y0, y1) = pane._widget.getPlotItem().getViewBox().viewRange()
+    ix, iy = (x1 - x0) * 0.02, (y1 - y0) * 0.02
+    corners = {
+        "bottom-left": (x0 + ix, y0 + iy),
+        "bottom-right": (x1 - ix, y0 + iy),
+        "top-left": (x0 + ix, y1 - iy),
+        "top-right": (x1 - ix, y1 - iy),
+    }
+    for where, (x, y) in corners.items():
+        pane._show_tooltip(x, y, "Set: Set 01\nFreq: 63.1 Hz\nΔZ' / |Z|: 0.5 %"
+                                 "\nΔZ'' / |Z|: -0.3 %", pinned=True)
+        QApplication.processEvents()
+        _assert_inside(pane, where)
+
+
+def test_the_wheel_re_fits_a_pinned_box(app):
+    """Zooming y moves the point the box hangs off; it must not be left under
+    an edge."""
+    pane = _shown_pane()
+    view = pane._widget.getPlotItem().getViewBox()
+    (x0, x1), (y0, y1) = view.viewRange()
+    pane._show_tooltip((x0 + x1) / 2, y1 * 0.02, "Set: Set 01\nFreq: 63.1 Hz\n"
+                                                 "ΔZ' / |Z|: 0.5 %\nΔZ'' / |Z|: -0.3 %",
+                       pinned=True)
+    QApplication.processEvents()
+
+    view.wheelEvent(_Wheel(-600))  # zoom out hard, so the point runs to zero
+    QApplication.processEvents()
+    _assert_inside(pane, "after the wheel")
+
+
+def test_swapping_the_figure_drops_the_box(app):
+    """The old box lived on the widget being deleted; a stale reference to it
+    would crash the next re-fit."""
+    pane = _shown_pane()
+    scatter = pane._widget.interactive_items[0]
+    pane._on_point_clicked(scatter, [scatter.points()[3]], None)
+    assert pane._tooltip_item is not None
+
+    pane.set_widget(build_residuals_plot(_benign(), threshold=5.0))
+    QApplication.processEvents()
+    assert pane._tooltip_item is None and not pane._pinned
+    pane._fit_tooltip_inside_plot()  # must not raise
 
 
 def test_the_pane_holds_one_figure_and_clears(app):

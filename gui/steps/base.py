@@ -150,10 +150,10 @@ class StepPage(QWidget):
         # and MainWindow._wire_steps reaches them by these names.
         self.single_radio = segmented.button(0)
         self.single_radio.setToolTip(
-            "Show one sweep, and step between them with the ‹ › controls."
+            "Display one sweep at a time controlled by ‹ ›."
         )
         self.combined_radio = segmented.button(1)
-        self.combined_radio.setToolTip("Draw every selected sweep on one figure.")
+        self.combined_radio.setToolTip("Display all active sweeps.")
         return segmented
 
     def add_display_mode_box(
@@ -277,6 +277,31 @@ def set_row_label(form: QFormLayout, field: QWidget, text: str) -> None:
         label.setText(text)
 
 
+def set_row_tooltip(form: QFormLayout, field: QWidget, text: str) -> None:
+    """Put one tooltip on a row's field and on its label. A label built from an
+    addRow() string carries no tooltip of its own, so hovering the row's name
+    otherwise falls through to the settings card's, which explains the card
+    rather than the setting under the cursor."""
+    field.setToolTip(text)
+    label = form.labelForField(field)
+    if label is not None:
+        label.setToolTip(text)
+
+
+def mirror_row_tooltips(form: QFormLayout) -> None:
+    """Copy each row's field tooltip onto its label, for a form whose fields
+    were given tooltips as they were built. Call once, after the last row.
+    Rows whose label already has its own tooltip are left alone."""
+    for row in range(form.rowCount()):
+        item = form.itemAt(row, QFormLayout.FieldRole)
+        field = item.widget() if item is not None else None
+        if field is None or not field.toolTip():
+            continue
+        label = form.labelForField(field)
+        if label is not None and not label.toolTip():
+            label.setToolTip(field.toolTip())
+
+
 def add_combo_items(combo: QComboBox, pairs) -> None:
     """Populate a QComboBox from (display_text, value) pairs, retrievable via
     combo.currentData()."""
@@ -291,10 +316,13 @@ def compact_combo(combo: QComboBox, chars: int = 12) -> QComboBox:
     return combo
 
 
-def section_label(text: str) -> QLabel:
+def section_label(text: str, tooltip: str = "") -> QLabel:
     """A small uppercase divider inside a long form, used instead of adding
-    group boxes."""
+    group boxes. Without a tooltip of its own it inherits the card's, so give
+    one to any header whose name is not self-explanatory."""
     label = QLabel(text)
     label.setObjectName("sectionHeader")
     label.setFont(style.section_font())
+    if tooltip:
+        label.setToolTip(tooltip)
     return label

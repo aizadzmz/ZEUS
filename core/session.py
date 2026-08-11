@@ -2,9 +2,9 @@
 # gzipped JSON (.eisz).
 #
 # pyimpspec's result classes (KramersKronigResult, ZHITResult, TRRBFResult,
-# BHTResult, DRTPeaks) have no to_dict()/from_dict(), so this module owns that
-# conversion rather than pickling, which would tie a session to one pyimpspec
-# class layout. Bump SCHEMA_VERSION (with a migration) on any format change.
+# DRTPeaks) have no to_dict()/from_dict(), so this module owns that conversion
+# rather than pickling, which would tie a session to one pyimpspec class
+# layout. Bump SCHEMA_VERSION (with a migration) on any format change.
 #
 # Gzipped rather than plain JSON: numeric arrays compress ~4-5x, and the gzip
 # magic bytes (1f 8b) let load_session still open old plain-JSON sessions.
@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from pyimpspec import DataSet, KramersKronigResult, ZHITResult, parse_cdc
-from pyimpspec.analysis.drt import BHTResult, TRRBFResult
+from pyimpspec.analysis.drt import TRRBFResult
 from pyimpspec.analysis.drt.peak_analysis import DRTPeak, DRTPeaks
 from pyimpspec.analysis.fitting import FitResult, FittedParameter
 
@@ -153,37 +153,12 @@ def trrbf_result_from_dict(d: dict) -> TRRBFResult:
     )
 
 
-# ---- DRT: BHT ----
-
-def bht_result_to_dict(result: BHTResult) -> dict:
-    return {
-        "time_constants": _real_array(result.time_constants),
-        "frequencies": _real_array(result.frequencies),
-        "impedances": _complex_array(result.impedances),
-        "residuals": _complex_array(result.residuals),
-        "pseudo_chisqr": result.pseudo_chisqr,
-        "real_gammas": _real_array(result.real_gammas),
-        "imaginary_gammas": _real_array(result.imaginary_gammas),
-        "scores": {k: {"re": v.real, "im": v.imag} for k, v in result.scores.items()},
-    }
-
-
-def bht_result_from_dict(d: dict) -> BHTResult:
-    return BHTResult(
-        time_constants=np.asarray(d["time_constants"]),
-        frequencies=np.asarray(d["frequencies"]),
-        impedances=_from_complex_array(d["impedances"]),
-        residuals=_from_complex_array(d["residuals"]),
-        pseudo_chisqr=d["pseudo_chisqr"],
-        real_gammas=np.asarray(d["real_gammas"]),
-        imaginary_gammas=np.asarray(d["imaginary_gammas"]),
-        scores={k: complex(v["re"], v["im"]) for k, v in d["scores"].items()},
-    )
-
-
-_DRT_KIND = {TRRBFResult: "tr_rbf", BHTResult: "bht"}
-_DRT_TO_DICT = {"tr_rbf": trrbf_result_to_dict, "bht": bht_result_to_dict}
-_DRT_FROM_DICT = {"tr_rbf": trrbf_result_from_dict, "bht": bht_result_from_dict}
+_DRT_KIND = {TRRBFResult: "tr_rbf"}
+_DRT_TO_DICT = {"tr_rbf": trrbf_result_to_dict}
+# Sessions written before the BHT method was dropped may hold a "bht" result.
+# Those kinds are skipped on load (see load_session) rather than migrated:
+# nothing left in the app can plot or export that shape of result.
+_DRT_FROM_DICT = {"tr_rbf": trrbf_result_from_dict}
 
 
 # ---- DRT peaks ----
@@ -501,13 +476,16 @@ def load_session(
         for v in session["validation_results"]
     }
 
+    # Unknown kinds are dropped rather than raising: an old session may carry a
+    # "bht" result from when that method existed, and the rest of it still loads.
+    drt_entries = [d for d in session["drt_results"] if d["kind"] in _DRT_FROM_DICT]
     drt_results = {
         _resolve_key(d): _DRT_FROM_DICT[d["kind"]](d["result"])
-        for d in session["drt_results"]
+        for d in drt_entries
     }
     drt_params = {
         _resolve_key(d): d.get("params", {})
-        for d in session["drt_results"]
+        for d in drt_entries
     }
 
     drt_peaks = {

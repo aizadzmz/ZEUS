@@ -43,8 +43,7 @@ class DataVizStep(StepPage):
         self.add_files_button = QPushButton("Add files…")
         self.add_files_button.setProperty("variant", "secondary")
         self.add_files_button.setToolTip(
-            "Load more file(s) alongside what's already open, keeping all "
-            "existing validation/DRT results."
+            "Load more file(s) alongside what's already open."
         )
         open_row.addWidget(self.add_files_button)
         load_layout.addLayout(open_row)
@@ -81,8 +80,7 @@ class DataVizStep(StepPage):
         self.marker_style_button = QPushButton("Marker & line style…")
         self.marker_style_button.setProperty("variant", "secondary")
         self.marker_style_button.setToolTip(
-            "Choose the marker shape for each loaded file, and the marker size "
-            "and line width shared by all of them."
+            "Choose the marker shape, marker size and line width."
         )
         plot_form.addRow(self.marker_style_button)
         self.add_settings(plot_box)
@@ -117,9 +115,8 @@ class DataVizStep(StepPage):
         self.nyquist_view_radio.setToolTip("-Z'' against Z', on equal-aspect axes.")
         self.bode_view_radio = view.button(1)
         self.bode_view_radio.setToolTip(
-            "|Z| (filled circles, left axis) and -phase (hollow circles, right "
-            "axis) against frequency, with frequency and |Z| drawn as decades. "
-            "A fixed view — use Auto-Scale or Replot to reframe it."
+            "|Z| (solid circles, left axis) and -Φ (hollow circles, right "
+            "axis) against frequency."
         )
         header.addWidget(view)
         header.addStretch()

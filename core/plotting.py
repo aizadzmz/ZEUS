@@ -34,6 +34,21 @@ SERIES_COLORS = (
 
 _REMOVED_COLOR = "#708090"  # slate: reads as discarded against every series
 
+
+def _with_alpha(color: str, alpha: int) -> pg.QtGui.QColor:
+    """One of the palette colours, translucent. Used where a series has to sit
+    behind another and still let it through."""
+    shaded = pg.mkColor(color)
+    shaded.setAlpha(alpha)
+    return shaded
+
+
+# What the Bayesian DRT run's extra output is called in a legend. pyimpspec
+# takes the 0.5% and 99.5% quantiles of its HMC samples, so the band spans the
+# central 99% of the posterior -- upstream's own plots call that "3σ", which is
+# the Gaussian approximation of it rather than what the code computes.
+CREDIBLE_INTERVAL_NAME = "mean, 99% CI"
+
 # Residual series names, keyed by core.validation.RESIDUAL_MODES. The keys are
 # spelled out rather than imported: core.validation pulls in pyimpspec, and
 # this module is imported to build figure panes long before the analysis stack
@@ -41,7 +56,7 @@ _REMOVED_COLOR = "#708090"  # slate: reads as discarded against every series
 # lists together so a new mode cannot land here unnamed.
 _RESIDUAL_SERIES_NAMES = {
     "modulus": ("ΔZ' / |Z|", "ΔZ'' / |Z|"),
-    "component": ("ΔZ' / |Z'|", "ΔZ'' / |Z''|"),
+    "component": ("ΔZ' / Z'", "ΔZ'' / Z''"),
 }
 
 # Residual axis framing, in percentage points above the highest limit line.
@@ -217,8 +232,13 @@ def _max_abs_extent(datasets: List[EISDataset], show_removed: bool) -> float:
 
 def point_tip(data) -> str:
     """The metadata box shown for one plotted point, built from the _point_data
-    payload rather than the plotted position."""
-    suffix = " (removed)" if data["removed"] else ""
+    payload rather than the plotted position.
+
+    `note` qualifies the set line: "removed" on a masked point, "off scale" on
+    a residual pinned to the axis edge. Spelled out by the payload rather than
+    derived here, so a plot can say what its own outliers mean."""
+    note = data.get("note") or ("removed" if data.get("removed") else "")
+    suffix = f" ({note})" if note else ""
     return (
         f"Set: {data['label']}{suffix}\n"
         f"Freq: {data['freq']:.4g} Hz\n"
@@ -1237,12 +1257,63 @@ def _follow_magnitude_y(main_view: pg.ViewBox, phase_view: pg.ViewBox) -> None:
     main_view._phase_follow = follow
 
 
+class _SymmetricYViewBox(pg.ViewBox):
+    """A ViewBox whose wheel zoom is anchored on y = 0 instead of on the cursor.
+
+    pyqtgraph scales about wherever the pointer happens to be, which walks the
+    residual axis off centre -- scroll near the top and you end up with, say,
+    -1% to +6%, so the two limit lines no longer sit a matched distance from
+    the zero line and the figure stops reading as symmetric. Residuals are
+    signed deviations about zero, so the x axis is the one point the scale
+    should always be stretched about.
+    """
+
+    def wheelEvent(self, ev, axis=None):
+        # axis=0 is the bottom axis' own wheel handler; x is masked out here
+        # (see build_residuals_plot), so there is nothing for it to scale.
+        if axis == 0 or not self.state["mouseEnabled"][1]:
+            ev.ignore()
+            return
+
+        s = 1.02 ** (ev.delta() * self.state["wheelScaleFactor"])
+        self._resetTarget()
+        # x=None leaves the frequency axis untouched; the centre's x is unused
+        # for the same reason (scaleBy takes the setYRange-only path).
+        self.scaleBy(y=s, center=pg.Point(0.0, 0.0))
+        ev.accept()
+        self.sigRangeChangedManually.emit([False, True])
+
+
+def _residual_text(value: float) -> str:
+    """One residual as it reads in a metadata box. The runaways a vanishing
+    denominator produces are shown for what they are rather than formatted as a
+    number nobody can read (see build_residuals_plot's off-scale handling)."""
+    if np.isnan(value):
+        return "n/a"
+    if np.isinf(value):
+        return "+∞ %" if value > 0 else "−∞ %"
+    return f"{value:.4g} %"
+
+
+def _residual_tip_values(names: Tuple[str, str], re_value, im_value) -> str:
+    """Both parts at one frequency, named for the convention in force.
+
+    Both, not just the hovered series: as on the Bode plot, what you want off a
+    point is the full state at that frequency -- a real part inside the limit
+    means little without the imaginary part beside it."""
+    return (
+        f"{names[0]}: {_residual_text(float(re_value))}\n"
+        f"{names[1]}: {_residual_text(float(im_value))}"
+    )
+
+
 def build_residuals_plot(
     result,
     title: Optional[str] = None,
     threshold: Optional[float] = None,
     soft_threshold: Optional[float] = None,
     residual_mode: Optional[str] = None,
+    label: Optional[str] = None,
 ) -> pg.PlotWidget:
     """Relative residuals, in percent, of a validation result (Kramers-Kronig
     or Z-HIT) against frequency, log-x.
@@ -1257,7 +1328,10 @@ def build_residuals_plot(
     the advanced mode's inner limit, drawn only when the two differ. They also
     frame the figure -- the axis runs to the higher of them plus
     _AXIS_HEADROOM_PERCENT, and residuals past that are pinned to the edge and
-    marked rather than allowed to set the scale."""
+    marked rather than allowed to set the scale.
+
+    `label` names the sweep in a point's metadata box; it falls back to the
+    title, which carries the label plus the method that produced it."""
     # Deferred, as the module docstring's import note explains. Free here: a
     # validation result in hand means the analysis stack is already loaded.
     from core.validation import RESIDUAL_BY_MODULUS, relative_residuals
@@ -1265,7 +1339,7 @@ def build_residuals_plot(
     residual_mode = residual_mode or RESIDUAL_BY_MODULUS
     freq, res_re, res_im = relative_residuals(result, residual_mode)
 
-    widget = pg.PlotWidget(title=title)
+    widget = pg.PlotWidget(title=title, viewBox=_SymmetricYViewBox())
     plot_item = widget.getPlotItem()
     plot_item.showGrid(x=True, y=True, alpha=0.3)
     plot_item.setLabel("bottom", "Frequency [Hz]")
@@ -1285,7 +1359,8 @@ def build_residuals_plot(
     # The scale is the one thing here worth adjusting. Framing on the limits
     # (see _AXIS_HEADROOM_PERCENT) leaves a well-fitted sweep as a near-flat
     # line across the middle, and stretching y is how you read its shape
-    # without losing the fixed framing everywhere else.
+    # without losing the fixed framing everywhere else. _SymmetricYViewBox
+    # keeps that stretch centred on the zero line.
     view_box = plot_item.getViewBox()
     view_box.setMouseEnabled(x=False, y=True)
     view_box.setMenuEnabled(False)
@@ -1318,18 +1393,40 @@ def build_residuals_plot(
 
     re_name, im_name = _RESIDUAL_SERIES_NAMES[residual_mode]
     re_color, im_color = SERIES_COLORS[0], SERIES_COLORS[1]
-    plot_item.plot(
-        freq, np.where(drawable[0], res_re, np.nan), connect="finite",
-        pen=pg.mkPen(re_color, width=1.5),
-        symbol="o", symbolSize=6, symbolBrush=re_color, symbolPen=None,
-        name=re_name,
-    )
-    plot_item.plot(
-        freq, np.where(drawable[1], res_im, np.nan), connect="finite",
-        pen=pg.mkPen(im_color, width=1.5),
-        symbol="s", symbolSize=6, symbolBrush=im_color, symbolPen=None,
-        name=im_name,
-    )
+
+    # One payload per plotted point, in the arrays' own order -- the series are
+    # drawn over the whole sweep with NaN in the off-scale slots, so the tips
+    # line up index for index. Note is empty here: a point drawn at its own
+    # value needs no qualifier, and the pinned ones carry theirs below.
+    tips = [
+        {
+            "label": label or title or "Residuals",
+            "index": int(i),
+            "freq": float(f),
+            "removed": False,
+            "values": _residual_tip_values((re_name, im_name), r, m),
+            "note": "",
+        }
+        for i, (f, r, m) in enumerate(zip(freq, res_re, res_im))
+    ]
+
+    interactive_items = []
+    for values, keep, name, color, symbol in (
+        (res_re, drawable[0], re_name, re_color, "o"),
+        (res_im, drawable[1], im_name, im_color, "s"),
+    ):
+        item = plot_item.plot(
+            freq, np.where(keep, values, np.nan), connect="finite",
+            pen=pg.mkPen(color, width=1.5),
+            symbol=symbol, symbolSize=6, symbolBrush=color, symbolPen=None,
+            name=name,
+            # Forwarded to the internal ScatterPlotItem (PlotDataItem maps
+            # 'data' straight through); `hoverable` is not on that list, so it
+            # is set below.
+            data=tips,
+        )
+        item.scatter.opts["hoverable"] = True
+        interactive_items.append(item.scatter)
 
     # Added before setLogMode below, which skips items lacking setLogMode --
     # InfiniteLine has none, so it needs no transform of its own.
@@ -1361,12 +1458,15 @@ def build_residuals_plot(
         if threshold is not None:
             _limit_lines(threshold, "orange", "hard limit" if paired else "threshold")
 
-    off_x, off_y = [], []
+    off_x, off_y, off_tips = [], [], []
     for values, keep in zip((res_re, res_im), drawable):
-        for x, value, ok in zip(freq, values, keep):
+        for i, (x, value, ok) in enumerate(zip(freq, values, keep)):
             if not ok:
                 off_x.append(float(x))
                 off_y.append(y_max * 0.97 if value > 0 else -y_max * 0.97)
+                # The marker sits at a made-up y, so its box is the only place
+                # the real number is readable -- hence the note.
+                off_tips.append({**tips[i], "note": "off scale"})
     if off_x:
         # Pinned inside the edge, unfilled, so a point too large to draw is
         # visibly *there* -- it was rejected, and a gap in the line would
@@ -1376,10 +1476,17 @@ def build_residuals_plot(
             symbol="t1", symbolSize=11, symbolBrush=None,
             symbolPen=pg.mkPen(_REMOVED_COLOR, width=1.5),
             name="off scale",
+            data=off_tips,
         )
+        off_scale.scatter.opts["hoverable"] = True
+        interactive_items.append(off_scale.scatter)
         # A named item is added to the legend by addItem itself, unlike the
         # limit lines above, whose labels are built from their levels.
         plot_item.addItem(off_scale, ignoreBounds=True)
+
+    # Read by the hosting pane to wire up the metadata boxes, as on the
+    # Nyquist and Bode plots.
+    widget.interactive_items = interactive_items
 
     # Must precede the fixed Y range below: updateLogMode re-triggers its own
     # autorange, which would clobber an earlier setYRange.
@@ -1389,42 +1496,138 @@ def build_residuals_plot(
     return widget
 
 
+def _drt_x_axis(plot_item) -> None:
+    """Label and orient a DRT plot's x axis: frequency, in decades, inverted so
+    high frequency sits on the left and the plot matches the Nyquist plot's
+    orientation."""
+    plot_item.setLabel("bottom", "Frequency [Hz]")
+    plot_item.setLogMode(x=True, y=False)
+    plot_item.getViewBox().invertX(True)
+
+
+def _drt_x_values(tau):
+    """The frequencies a run of time constants is drawn against."""
+    return 1.0 / (2.0 * math.pi * tau)
+
+
+def _collect_drt_bounds(xs: List[float], ys: List[float], x, y) -> None:
+    """Fold one drawn curve into the running range.
+
+    The x values go in as decades: _drt_x_axis puts the plot in log mode, which
+    leaves the series carrying raw frequencies while the ViewBox works in log10
+    of them -- so a range built from the raw values would land the view nowhere
+    near the curve.
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    # A non-positive or non-finite x has no logarithm and would poison min/max.
+    keep = np.isfinite(x) & (x > 0) & np.isfinite(y)
+    if not keep.any():
+        return
+    xs.extend(np.log10(x[keep]))
+    ys.extend(y[keep])
+
+
+def _set_drt_range(widget, xs: List[float], ys: List[float]) -> None:
+    """Hang the framing PgFigurePane's Auto-Scale button reads off `widget`.
+    The range key is what lets a rebuild of the same plot -- running the peak
+    fit, say -- keep the view the user panned to."""
+    widget.kept_range = widget.full_range = _bounds(xs, ys, equal_aspect=False)
+    widget.range_key = "drt"
+
+
+def credible_intervals(result):
+    """(freq, mean, lower, upper) for a DRT result carrying Bayesian credible
+    intervals, or None for one that does not.
+
+    Only a Bayesian run has them. pyimpspec leaves the three arrays empty
+    otherwise and get_drt_credible_intervals_data() then hands back four empty
+    arrays, which is the "nothing to draw" case here -- as is a result class
+    that has no such method at all."""
+    getter = getattr(result, "get_drt_credible_intervals_data", None)
+    if getter is None:
+        return None
+    tau, mean, lower, upper = getter()
+    if len(tau) == 0:
+        return None
+    return _drt_x_values(tau), mean, lower, upper
+
+
+def _add_credible_band(plot_item, freq, lower, upper, color) -> None:
+    """Shade between the credible interval's bounds, under the curves.
+
+    The two edges are plotted rather than passed straight to FillBetweenItem
+    because the fill tracks its curves in *plotted* coordinates: this axis is
+    logarithmic, and only an item the PlotItem owns gets told so. They are
+    drawn faintly rather than hidden, so the envelope still reads at a glance
+    where the fill is too pale to see -- over a light peak, say.
+
+    Added after the log mode is set (see build_drt_plot), so the fill's first
+    path is built from edges already mapped into decades."""
+    edges = [
+        plot_item.plot(freq, bound, pen=pg.mkPen(_with_alpha(color, 110), width=1.0))
+        for bound in (lower, upper)
+    ]
+    band = pg.FillBetweenItem(*edges, brush=pg.mkBrush(_with_alpha(color, 45)))
+    # Behind the curves: FillBetweenItem sinks itself below its own edges, and
+    # those sit at the default depth alongside every other series.
+    plot_item.addItem(band, ignoreBounds=True)
+
+
 def build_drt_plot(results: List[Tuple[str, object]], title: str = "DRT") -> pg.PlotWidget:
     """Gamma vs frequency for one or more (label, result) pairs, log-x, high
-    frequency on the left."""
+    frequency on the left.
+
+    A Bayesian run carries credible intervals as well as the distribution
+    itself; those are drawn as a shaded band around a dashed posterior mean, in
+    the sweep's own colour. It is the only thing that run produces beyond what
+    a plain TR-RBF run does, and it takes minutes to hours to get, so it is
+    always drawn when it is there."""
     if not results:
         raise ValueError("No DRT results provided to plot.")
 
     widget = pg.PlotWidget(title=title)
     plot_item = widget.getPlotItem()
     plot_item.showGrid(x=True, y=True, alpha=0.3)
-    plot_item.setLabel("bottom", "Frequency [Hz]")
     plot_item.setLabel("left", "γ [Ω]")
     _close_plot_box(plot_item)
     _hide_plot_options_menu(plot_item)
     _add_outside_legend(plot_item)
 
+    # Before anything is plotted, unlike the other builders: PlotItem.addItem
+    # puts each new item into the mode the axis is already in, which is what
+    # lets the credible band be filled between two curves in plotted
+    # coordinates rather than raw hertz.
+    _drt_x_axis(plot_item)
+
+    # What the Auto-Scale button frames (see PgFigurePane._autoscale). A DRT
+    # curve has no removed points, so the kept and full spans are the same one.
+    xs: List[float] = []
+    ys: List[float] = []
+
     for i, (label, result) in enumerate(results):
         color = SERIES_COLORS[i % len(SERIES_COLORS)]
-        data = result.get_drt_data()
-        if len(data) == 3:
-            tau, gamma_re, gamma_im = data
-            freq = 1.0 / (2.0 * math.pi * tau)
-            plot_item.plot(freq, gamma_re, pen=pg.mkPen(color, width=1.5), name=f"{label} (Re)")
-            plot_item.plot(
-                freq, gamma_im,
-                pen=pg.mkPen(color, width=1.5, style=Qt.DashLine),
-                name=f"{label} (Im)",
-            )
-        else:
-            tau, gamma = data
-            freq = 1.0 / (2.0 * math.pi * tau)
-            plot_item.plot(freq, gamma, pen=pg.mkPen(color, width=1.5), name=label)
+        tau, gamma = result.get_drt_data()
+        freq = _drt_x_values(tau)
+        plot_item.plot(freq, gamma, pen=pg.mkPen(color, width=1.5), name=label)
+        _collect_drt_bounds(xs, ys, freq, gamma)
 
-    # High frequency on the left, low frequency on the right, to match the
-    # Nyquist plot's orientation.
-    plot_item.setLogMode(x=True, y=False)
-    plot_item.getViewBox().invertX(True)
+        interval = credible_intervals(result)
+        if interval is None:
+            continue
+        band_freq, mean, lower, upper = interval
+        _add_credible_band(plot_item, band_freq, lower, upper, color)
+        plot_item.plot(
+            band_freq, mean,
+            pen=pg.mkPen(color, width=1.2, style=Qt.DashLine),
+            name=f"{label} ({CREDIBLE_INTERVAL_NAME})",
+        )
+        # The band frames the plot too: it is wider than the curve by
+        # construction, and cropping the uncertainty would defeat drawing it.
+        _collect_drt_bounds(xs, ys, band_freq, lower)
+        _collect_drt_bounds(xs, ys, band_freq, upper)
+
+    _set_drt_range(widget, xs, ys)
     return widget
 
 
@@ -1442,18 +1645,20 @@ def build_drt_peaks_plot(
     widget = pg.PlotWidget(title=title)
     plot_item = widget.getPlotItem()
     plot_item.showGrid(x=True, y=True, alpha=0.3)
-    plot_item.setLabel("bottom", "Frequency [Hz]")
     plot_item.setLabel("left", "γ [Ω]")
     _close_plot_box(plot_item)
     _hide_plot_options_menu(plot_item)
     _add_outside_legend(plot_item)
+
+    xs: List[float] = []
+    ys: List[float] = []
 
     for i, (label, peaks) in enumerate(results):
         if peaks.get_num_peaks() < 1:
             continue
         color = SERIES_COLORS[i % len(SERIES_COLORS)]
         tau = peaks.get_time_constants(num_per_decade=num_per_decade)
-        freq = 1.0 / (2.0 * math.pi * tau)
+        freq = _drt_x_values(tau)
 
         if show_individual_peaks:
             # Before the sum, so the heavier total line draws over them.
@@ -1464,13 +1669,17 @@ def build_drt_peaks_plot(
                     pen=pg.mkPen(color, width=1.0, style=Qt.DashLine),
                 )
 
+        # Only the summed curve is framed: an individual peak sits under it by
+        # construction, so it can add nothing to the range.
+        gammas = peaks.get_gammas(num_per_decade=num_per_decade)
         plot_item.plot(
             freq,
-            peaks.get_gammas(num_per_decade=num_per_decade),
+            gammas,
             pen=pg.mkPen(color, width=1.5),
             name=f"{label} ({peaks.get_num_peaks()} peak(s))",
         )
+        _collect_drt_bounds(xs, ys, freq, gammas)
 
-    plot_item.setLogMode(x=True, y=False)
-    plot_item.getViewBox().invertX(True)
+    _drt_x_axis(plot_item)
+    _set_drt_range(widget, xs, ys)
     return widget

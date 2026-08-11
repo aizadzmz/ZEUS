@@ -171,25 +171,20 @@ def write_ecm_fit_curve(path: Path, result, num_per_decade: int = 20) -> Path:
 
 def write_drt(path: Path, result) -> Path:
     """A DRT result as tau vs gamma."""
-    data = result.get_drt_data()
-    taus, gammas = data[0], data[1]
+    taus, gammas = result.get_drt_data()
 
     header = ["eis:tau_second", "eis:gamma_ohm"]
     columns = [taus, gammas]
 
-    if len(data) == 3:  # BHT
-        header = ["eis:tau_second", "eis:gamma_real_ohm", "eis:gamma_imaginary_ohm"]
-        columns = [taus, data[1], data[2]]
-    else:
-        try:
-            _, mean, lower, upper = result.get_drt_credible_intervals_data()
-        except Exception:
-            mean = lower = upper = None
-        # An empty array is how pyimpspec reports "no credible intervals" for a
-        # non-Bayesian run, so length-check rather than trusting the call alone.
-        if mean is not None and len(mean) == len(taus):
-            header += ["eis:gamma_mean_ohm", "eis:gamma_lower_ohm", "eis:gamma_upper_ohm"]
-            columns += [mean, lower, upper]
+    try:
+        _, mean, lower, upper = result.get_drt_credible_intervals_data()
+    except Exception:
+        mean = lower = upper = None
+    # An empty array is how pyimpspec reports "no credible intervals" for a
+    # non-Bayesian run, so length-check rather than trusting the call alone.
+    if mean is not None and len(mean) == len(taus):
+        header += ["eis:gamma_mean_ohm", "eis:gamma_lower_ohm", "eis:gamma_upper_ohm"]
+        columns += [mean, lower, upper]
 
     rows = (tuple(_num(v) for v in row) for row in zip(*columns))
     return _write_csv(path, header, rows)

@@ -126,7 +126,7 @@ class MainWindow(QMainWindow):
         self._running_method = ""
         # The sweeps it covers, so the prune summary can be built once it ends.
         self._running_keys: List[str] = []
-        # {ds.key: TRRBFResult | BHTResult} -- last DRT run wins
+        # {ds.key: TRRBFResult} -- last DRT run wins
         self._drt_results = {}
         # {ds.key: effective kwargs}
         self._drt_params: Dict[str, dict] = {}
@@ -137,6 +137,10 @@ class MainWindow(QMainWindow):
         # Settings for the batch in flight: result_ready carries only
         # (label, result), so _on_drt_worker_result reads them from here.
         self._pending_drt_params: dict = {}
+        # What the batch in flight is called and how many sweeps it covers,
+        # kept for the summary _on_drt_worker_finished shows once it ends.
+        self._drt_run_name = "DRT"
+        self._drt_run_total = 0
         # {(canonical cdc, ds.key): FitResult}. Keyed by circuit as well as
         # sweep, so fitting a second circuit keeps the first one's result.
         self._ecm_results: Dict[Tuple[str, str], object] = {}
@@ -358,6 +362,7 @@ class MainWindow(QMainWindow):
         # re-run can change what an *advanced* prune already removed, which
         # _update_residuals_header says out loud.
         val.residual_modulus_radio.toggled.connect(self._refresh)
+        val.export_results_button.clicked.connect(self._export_validation_results)
 
         drt = self.drt_step
         # Redraws the measured plot with the dropped points greyed out; the
@@ -1001,6 +1006,106 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"Saved plot to '{Path(path).name}'.")
 
+    def _chosen_export_path(self, path: str, chosen_filter: str, zview_filter: str):
+        """(path, is_zview) for a save dialog offering CSV or ZView.
+
+        An explicit .z or .csv the user typed wins over the filter dropdown,
+        which they may never have touched.
+        """
+        path = Path(path)
+        if path.suffix.lower() in (".z", ".csv"):
+            return path, path.suffix.lower() == ".z"
+        zview = chosen_filter == zview_filter
+        return path.with_suffix(".z" if zview else ".csv"), zview
+
+    # How the validated spectrum leaves the app. Both formats carry the kept
+    # points only -- the rejected ones are gone from the file, not flagged in it.
+    _VALIDATION_CSV_FILTER = "Spectrum table (*.csv)"
+    _VALIDATION_ZVIEW_FILTER = "ZView data file (*.z)"
+
+    def _export_validation_results(self) -> None:
+        """The validated sweep on screen: the surviving points, plus whatever
+        the chosen format can carry of the validation itself."""
+        title = "Export validated data"
+        ds = self._cursor_dataset(title)
+        if ds is None:
+            return
+        method = self._validation_method
+        result = self._validation_results.get((method, ds.key))
+        if result is None:
+            QMessageBox.information(
+                self, title, f"Run a {method} validation on this sweep first."
+            )
+            return
+
+        from core.bdf_export import file_stem
+
+        suggested = f"{file_stem(ds)}.validated.csv"
+        path, chosen_filter = QFileDialog.getSaveFileName(
+            self,
+            title,
+            suggested,
+            f"{self._VALIDATION_CSV_FILTER};;{self._VALIDATION_ZVIEW_FILTER}",
+        )
+        if not path:
+            return
+        path, zview = self._chosen_export_path(
+            path, chosen_filter, self._VALIDATION_ZVIEW_FILTER
+        )
+
+        try:
+            if zview:
+                written = self._write_validation_zview(path, ds, result, method)
+            else:
+                written = self._write_validation_csv(path, ds, result)
+        except Exception as exc:
+            QMessageBox.critical(self, title, f"Could not export:\n{exc}")
+            return
+
+        kept = ds.data.get_num_points(masked=False)
+        total = ds.data.get_num_points(masked=None)
+        self.statusBar().showMessage(
+            f"Exported {len(written)} file(s) for {self._display_label(ds)} — "
+            f"{kept} of {total} point(s) kept."
+        )
+
+    def _write_validation_csv(self, path: Path, ds, result) -> list:
+        from core.bdf_export import write_residuals, write_spectrum
+
+        written = [write_spectrum(path, ds, kept_only=True)]
+        # path.stem is "<sweep>.validated", so this lands beside the spectrum as
+        # "<sweep>.validated_residuals.csv". Always in the ΔZ/|Z| convention,
+        # whatever the Residuals setting is displaying -- see the tooltip there.
+        written.append(
+            write_residuals(path.with_name(f"{path.stem}_residuals.csv"), result)
+        )
+        return written
+
+    def _write_validation_zview(self, path: Path, ds, result, method: str) -> list:
+        """The kept points as a .z, and the validation's own reconstruction as a
+        second .z beside it, which ZView opens as a separate data set to
+        overlay."""
+        from core.zview_export import write_spectrum_z, write_validation_fit_z
+
+        kept = ds.data.get_num_points(masked=False)
+        total = ds.data.get_num_points(masked=None)
+        written = [
+            write_spectrum_z(
+                path,
+                ds,
+                kept_only=True,
+                comment=f"{kept} of {total} points kept after {method} validation",
+            )
+        ]
+        written.append(
+            write_validation_fit_z(
+                path.with_name(f"{path.stem}_fit.z"),
+                result,
+                comment=f"{method} fit to the {kept} kept points",
+            )
+        )
+        return written
+
     # The two ways the DRT can leave the app. The peaks, when they have been
     # fitted, always follow the curve into a companion file next to it.
     _DRT_CSV_FILTER = "DRT table (*.csv)"
@@ -1032,14 +1137,9 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
-        # An explicit .z or .csv the user typed wins over the filter dropdown,
-        # which they may never have touched.
-        path = Path(path)
-        if path.suffix.lower() in (".z", ".csv"):
-            zview = path.suffix.lower() == ".z"
-        else:
-            zview = chosen_filter == self._DRT_ZVIEW_FILTER
-            path = path.with_suffix(".z" if zview else ".csv")
+        path, zview = self._chosen_export_path(
+            path, chosen_filter, self._DRT_ZVIEW_FILTER
+        )
 
         peaks = self._drt_peaks.get(ds.key)
         try:
@@ -1371,7 +1471,7 @@ class MainWindow(QMainWindow):
         # Z-HIT takes no extra kwargs; these mirror the non-default arguments
         # in core.validation.run_kk_test's signature.
         params = (
-            {"admittance": False, "num_F_ext_evaluations": 10}
+            {"test": "complex", "admittance": False, "num_F_ext_evaluations": 10}
             if method == VALIDATION_METHODS[0]
             else {}
         )
@@ -1430,28 +1530,21 @@ class MainWindow(QMainWindow):
             )
         self._refresh()
 
-    def _drt_settings(self) -> dict:
-        """Shared TR-RBF/BHT settings read from the '6. DRT settings' panel."""
-        return dict(
-            rbf_type=self.drt_step.rbf_combo.currentData(),
-            derivative_order=self.drt_step.derivative_combo.currentData(),
-            rbf_shape=self.drt_step.shape_control_combo.currentData(),
-            shape_coeff=self.drt_step.shape_coeff_spin.value(),
-        )
-
-    def _drt_inputs(self, datasets: List) -> List:
+    def _drt_inputs(self, datasets: List, detached: bool = False) -> List:
         """The sweeps the DRT sees, which are not necessarily the sweeps
         themselves: the DRT step's own inductive-tail filter is applied to
         copies. The shared mask stays put, so a validation run done without
-        that filter is not marked stale by turning it on here -- and the copies
-        are what make this safe to hand to the Bayesian worker thread, which
-        runs while the UI still draws the originals."""
-        if not self.drt_step.remove_inductive_check.isChecked():
-            return datasets
+        that filter is not marked stale by turning it on here.
 
-        from core.filtering import inductive_tail_removed
+        `detached` guarantees copies whether or not that filter is on, for the
+        worker thread: it reads its datasets for as long as the run lasts, and
+        the eraser stays live on the plot throughout, so the originals can be
+        remasked under it. Callers that only draw pass the live sweeps."""
+        from core.filtering import detached_copy, inductive_tail_removed
 
-        return [inductive_tail_removed(ds) for ds in datasets]
+        if self.drt_step.remove_inductive_check.isChecked():
+            return [inductive_tail_removed(ds) for ds in datasets]
+        return [detached_copy(ds) for ds in datasets] if detached else datasets
 
     def _drt_record(self, params: dict) -> dict:
         """What gets saved/exported for a run. The filter changes the input
@@ -1473,47 +1566,35 @@ class MainWindow(QMainWindow):
 
     def _run_drt(self) -> None:
         """Run DRT, dispatching on the method chosen in the settings panel."""
-        method = self.drt_step.method
-        if method == "trrbf":
+        if self.drt_step.method == "trrbf":
             self._run_drt_simple()
-        elif method == "bayesian":
-            self._run_drt_bayesian()
         else:
-            self._run_drt_bht()
+            self._run_drt_bayesian()
+
+    def _drt_run_settings(self) -> dict:
+        """The '6. DRT settings' panel as run_drt kwargs. Both methods pass all
+        of these; what separates them is credible_intervals and the sampling
+        rows that only it reads."""
+        return dict(
+            rbf_type=self.drt_step.rbf_combo.currentData(),
+            derivative_order=self.drt_step.derivative_combo.currentData(),
+            rbf_shape=self.drt_step.shape_control_combo.currentData(),
+            shape_coeff=self.drt_step.shape_coeff_spin.value(),
+            mode=self.drt_step.mode_combo.currentData(),
+            inductance=self.drt_step.inductance_check.isChecked(),
+            cross_validation=self.drt_step.cv_combo.currentData(),
+            lambda_value=self.drt_step.lambda_spin.value(),
+        )
 
     def _run_drt_simple(self) -> None:
         selected = self._selected_datasets()
         if not selected:
             return
-
-        from core.drt import run_drt
-
-        settings = self._drt_settings()
-        params = dict(
-            settings,
-            mode=self.drt_step.mode_combo.currentData(),
-            inductance=self.drt_step.inductance_check.isChecked(),
-            cross_validation=self.drt_step.cv_combo.currentData(),
-            lambda_value=self.drt_step.lambda_spin.value(),
-            credible_intervals=False,
+        self._start_drt_run(
+            selected,
+            dict(self._drt_run_settings(), credible_intervals=False),
+            "DRT",
         )
-        recorded = self._drt_record(params)
-        errors = []
-        for ds in self._drt_inputs(selected):
-            try:
-                self._drt_results[ds.key] = run_drt(ds, **params)
-            except Exception as exc:
-                errors.append((ds.key, str(exc)))
-            else:
-                self._drt_params[ds.key] = recorded
-
-        if errors:
-            details = "\n".join(f"- {self._display_label(key)}: {msg}" for key, msg in errors)
-            QMessageBox.warning(self, "DRT errors", f"Some sweeps failed:\n{details}")
-
-        self._update_optimal_lambda_label(selected)
-        self.statusBar().showMessage(f"Simple run DRT computed for {len(selected) - len(errors)} sweep(s).")
-        self._refresh()
 
     def _run_drt_bayesian(self) -> None:
         selected = self._selected_datasets()
@@ -1532,31 +1613,48 @@ class MainWindow(QMainWindow):
         if confirm != QMessageBox.Yes:
             return
 
-        from core.drt import run_drt
-
-        settings = self._drt_settings()
-        params = dict(
-            settings,
-            mode=self.drt_step.mode_combo.currentData(),
-            inductance=self.drt_step.inductance_check.isChecked(),
-            cross_validation=self.drt_step.cv_combo.currentData(),
-            lambda_value=self.drt_step.lambda_spin.value(),
-            credible_intervals=True,
-            num_samples=self.drt_step.num_samples_spin.value(),
-            timeout=self.drt_step.timeout_spin.value(),
+        self._start_drt_run(
+            selected,
+            dict(
+                self._drt_run_settings(),
+                credible_intervals=True,
+                num_samples=self.drt_step.num_samples_spin.value(),
+                timeout=self.drt_step.timeout_spin.value(),
+            ),
+            "Bayesian DRT",
         )
+
+    def _start_drt_run(self, selected: List, params: dict, name: str) -> None:
+        """Hand a batch of sweeps to the DRT worker thread.
+
+        Plain TR-RBF runs here too, not just the Bayesian method, because it is
+        only fast on a sweep pyimpspec can take its shortcut on: assembling the
+        A matrix by the Toeplitz trick needs the frequencies log-spaced to
+        within 1%, which costs 2N quadratures instead of 2N². Points dropped by
+        the eraser, an iterative prune or the inductive-tail filter break that
+        spacing, and so do the rounded frequencies most instruments write (a
+        three-significant-figure decade ladder lands at ~1.4%). The fallback
+        takes tens of seconds a sweep -- far too long to hold the UI thread.
+        """
+        from core.drt import run_drt
 
         def runner(ds):
             return run_drt(ds, **params)
 
+        self._drt_run_name = name
+        self._drt_run_total = len(selected)
         self._pending_drt_params = self._drt_record(params)
         self._drt_worker_errors = []
-        self._drt_worker = DRTWorker(runner, self._drt_inputs(selected), parent=self)
+        self._drt_worker = DRTWorker(
+            runner, self._drt_inputs(selected, detached=True), parent=self
+        )
         self._drt_worker.result_ready.connect(self._on_drt_worker_result)
         self._drt_worker.error.connect(self._on_drt_worker_error)
         self._drt_worker.finished.connect(self._on_drt_worker_finished)
         self._set_controls_enabled(False)
-        self.statusBar().showMessage("Running Bayesian DRT… this may take a while.")
+        self.statusBar().showMessage(
+            f"Running {name} on {len(selected)} sweep(s)… this may take a while."
+        )
         self._drt_worker.start()
 
     def _on_drt_worker_result(self, key: str, result) -> None:
@@ -1569,42 +1667,17 @@ class MainWindow(QMainWindow):
     def _on_drt_worker_finished(self) -> None:
         self._drt_worker = None
         self._set_controls_enabled(True)
-        self.statusBar().showMessage("Bayesian DRT finished.")
+        computed = self._drt_run_total - len(self._drt_worker_errors)
+        self.statusBar().showMessage(
+            f"{self._drt_run_name} computed for {computed} of "
+            f"{self._drt_run_total} sweep(s)."
+        )
         if self._drt_worker_errors:
             details = "\n".join(
                 f"- {self._display_label(key)}: {msg}" for key, msg in self._drt_worker_errors
             )
             QMessageBox.warning(self, "DRT errors", f"Some sweeps failed:\n{details}")
         self._update_optimal_lambda_label(self._selected_datasets())
-        self._refresh()
-
-    def _run_drt_bht(self) -> None:
-        selected = self._selected_datasets()
-        if not selected:
-            return
-
-        from core.drt import run_drt_bht
-
-        settings = self._drt_settings()
-        params = dict(settings, num_samples=self.drt_step.num_samples_spin.value())
-        recorded = self._drt_record(params)
-        errors = []
-        for ds in self._drt_inputs(selected):
-            try:
-                self._drt_results[ds.key] = run_drt_bht(ds, **params)
-            except Exception as exc:
-                errors.append((ds.key, str(exc)))
-            else:
-                self._drt_params[ds.key] = recorded
-
-        if errors:
-            details = "\n".join(f"- {self._display_label(key)}: {msg}" for key, msg in errors)
-            QMessageBox.warning(self, "DRT errors", f"Some sweeps failed:\n{details}")
-
-        self._update_optimal_lambda_label(selected)
-        self.statusBar().showMessage(
-            f"Hilbert Transform DRT computed for {len(selected) - len(errors)} sweep(s)."
-        )
         self._refresh()
 
     def _run_peak_analysis(self) -> None:
@@ -2371,6 +2444,9 @@ class MainWindow(QMainWindow):
                     threshold=p["threshold"],
                     soft_threshold=p["soft_threshold"],
                     residual_mode=p["residual_mode"],
+                    # Bare, without the method the title carries: a point's
+                    # metadata box names the sweep, as on every other plot.
+                    label=self._display_label(ds),
                 )
             self.validation_step.residuals_pane.set_widget(figure)
             self._update_residuals_header(len(shown), len(validated))

@@ -18,6 +18,8 @@ from core.zview_export import (
     peak_rc_pairs,
     write_drt_model,
     write_drt_z,
+    write_spectrum_z,
+    write_validation_fit_z,
 )
 
 ZVIEW_SAMPLES = Path("C:/SAI")
@@ -106,6 +108,118 @@ def test_z_frequency_descends(tmp_path, drt):
     _, rows = read_z(write_drt_z(tmp_path / "a.z", drt))
     frequencies = np.array([float(row.split(",")[0]) for row in rows])
     assert np.all(np.diff(frequencies) < 0)
+
+
+# ---- validated spectrum ----
+
+def values_of(rows):
+    """The seven float columns of each data line, as an array."""
+    return np.array([[float(f) for f in row.split(",")[:7]] for row in rows])
+
+
+def test_spectrum_z_writes_the_impedance_columns(tmp_path, dataset):
+    """Z' and Z'' land in their own columns, Z'' signed as ZView stores it."""
+    _, rows = read_z(write_spectrum_z(tmp_path / "s.z", dataset))
+    Z = dataset.data.get_impedances(masked=False)
+
+    values = values_of(rows)
+    # Written highest frequency first, which the fixture's logspace is not.
+    order = np.argsort(dataset.data.get_frequencies(masked=False))[::-1]
+    assert np.allclose(values[:, 4], Z[order].real, rtol=1e-5)
+    assert np.allclose(values[:, 5], Z[order].imag, rtol=1e-5)
+    # A capacitive sweep: ZView's own files keep Z'' negative rather than -Z''.
+    assert np.all(values[:, 5] <= 0)
+    assert np.all(np.diff(values[:, 0]) < 0)
+
+
+def test_spectrum_z_writes_kept_points_only(tmp_path, dataset):
+    """The rejected points are absent from the file, not flagged in it -- that
+    is what makes this an after-validation export."""
+    from copy import deepcopy
+
+    masked = EISDataset(
+        deepcopy(dataset.data), dataset.index, dataset.source_file, dataset.file_id
+    )
+    masked.data.set_mask({0: True, 5: True, 6: True})
+
+    header, rows = read_z(write_spectrum_z(tmp_path / "s.z", masked))
+    total = masked.data.get_num_points(masked=None)
+    assert len(rows) == total - 3
+    assert int(header[9]) == len(rows), "the point count must follow the removal"
+
+    dropped = masked.data.get_frequencies(masked=True)
+    written = values_of(rows)[:, 0]
+    for f in dropped:
+        assert not np.any(np.isclose(written, f, rtol=1e-5))
+
+
+def test_spectrum_z_can_write_the_unmasked_sweep(tmp_path, dataset):
+    from copy import deepcopy
+
+    masked = EISDataset(
+        deepcopy(dataset.data), dataset.index, dataset.source_file, dataset.file_id
+    )
+    masked.data.set_mask({0: True})
+
+    _, rows = read_z(write_spectrum_z(tmp_path / "s.z", masked, kept_only=False))
+    assert len(rows) == masked.data.get_num_points(masked=None)
+
+
+def test_spectrum_z_refuses_a_fully_masked_sweep(tmp_path, dataset):
+    from copy import deepcopy
+
+    empty = EISDataset(
+        deepcopy(dataset.data), dataset.index, dataset.source_file, dataset.file_id
+    )
+    empty.data.set_mask({i: True for i in range(empty.data.get_num_points(masked=None))})
+
+    with pytest.raises(ValueError, match="nothing to write"):
+        write_spectrum_z(tmp_path / "s.z", empty)
+
+
+def test_comment_cannot_break_the_header(tmp_path, dataset):
+    """The header is quote-delimited and line-positional, so a quote or newline
+    in the free text would shift every line after it."""
+    header, rows = read_z(
+        write_spectrum_z(
+            tmp_path / "s.z", dataset, comment='he said "12 of 40"\nkept'
+        )
+    )
+    assert len(header) == 11
+    assert header[5] == '"he said \'12 of 40\' kept"'
+    assert int(header[9]) == len(rows)
+
+
+# ---- validation fit ----
+
+@pytest.fixture(scope="module")
+def kk(dataset):
+    from core.validation import run_kk_test
+
+    return run_kk_test(dataset)
+
+
+def test_validation_fit_z_carries_the_reconstruction(tmp_path, kk):
+    _, rows = read_z(write_validation_fit_z(tmp_path / "f.z", kk))
+    frequencies = kk.get_frequencies()
+    Z = kk.get_impedances()
+    order = np.argsort(frequencies)[::-1]
+
+    values = values_of(rows)
+    assert len(rows) == len(frequencies)
+    assert np.allclose(values[:, 0], frequencies[order], rtol=1e-5)
+    assert np.allclose(values[:, 4], Z[order].real, rtol=1e-5)
+    assert np.allclose(values[:, 5], Z[order].imag, rtol=1e-5)
+
+
+def test_validation_fit_z_overlays_the_spectrum(tmp_path, dataset, kk):
+    """With nothing masked the two files share their frequencies in the same
+    order, so ZView plots them on top of each other. Once points are rejected
+    the fit keeps its own, wider coverage -- see write_validation_fit_z."""
+    _, spectrum = read_z(write_spectrum_z(tmp_path / "s.z", dataset))
+    _, fit = read_z(write_validation_fit_z(tmp_path / "f.z", kk))
+
+    assert np.allclose(values_of(fit)[:, 0], values_of(spectrum)[:, 0], rtol=1e-5)
 
 
 # ---- model file ----

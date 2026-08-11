@@ -173,7 +173,7 @@ result = FitResult(freq, Z_exp, offset_fit(Z_exp))
 assert np.allclose(_measured_impedances(result), Z_exp), "modulus recovery drifted"
 print("Z_exp recovery OK: exact to", float(np.abs(_measured_impedances(result) - Z_exp).max()))
 
-# --- COMPONENT is MODULUS rescaled by |Z| / |Z_component| ---
+# --- COMPONENT is MODULUS rescaled by |Z| / Z_component ---
 # A point well clear of both axes, where the two conventions stay comparable.
 Z_exp = np.array([100 + 60j])
 result = FitResult([1.0], Z_exp, offset_fit(Z_exp))
@@ -184,7 +184,30 @@ assert np.allclose(comp_re, mod_re * modulus / 100.0)
 assert np.allclose(comp_im, mod_im * modulus / 60.0)
 # The imaginary part is the smaller one, so it is the one that reads worse.
 assert abs(comp_im[0]) > abs(comp_re[0]) > abs(mod_re[0])
-print(f"component rescaling OK: {mod_im[0]:.3f}% by |Z| -> {comp_im[0]:.3f}% by |Z''|")
+print(f"component rescaling OK: {mod_im[0]:.3f}% by |Z| -> {comp_im[0]:.3f}% by Z''")
+
+# --- ...and the denominator is signed, so a capacitive Z'' mirrors ---
+# The case measured data actually presents: Z'' < 0. Dividing by |Z''| instead
+# would leave every magnitude here untouched and flip only the sign, which is
+# exactly what makes such a bug survive a spread- or threshold-based check.
+# RelaxIS divides by the signed component; matching it is the point.
+Z_exp = np.array([100 - 60j])
+result = FitResult([1.0], Z_exp, offset_fit(Z_exp))
+_, mod_re, mod_im = relative_residuals(result, RESIDUAL_BY_MODULUS)
+_, comp_re, comp_im = relative_residuals(result, RESIDUAL_BY_COMPONENT)
+modulus = float(np.abs(Z_exp[0]))
+assert np.allclose(comp_re, mod_re * modulus / 100.0), comp_re
+assert np.allclose(comp_im, mod_im * modulus / -60.0), comp_im
+# Not merely "the right size": the sign is opposite MODULUS, and dividing by
+# the magnitude would have given the other one.
+assert comp_im[0] * mod_im[0] < 0, (comp_im[0], mod_im[0])
+assert not np.allclose(comp_im, mod_im * modulus / 60.0), "denominator lost its sign"
+# Rejection reads magnitudes, so the mirroring must not reach it.
+assert np.allclose(
+    residual_deviations(result, RESIDUAL_BY_COMPONENT),
+    [max(abs(comp_re[0]), abs(comp_im[0]))],
+)
+print(f"signed denominator OK: Z''<0 gives {mod_im[0]:+.3f}% by |Z| -> {comp_im[0]:+.3f}% by Z''")
 
 # --- A small component is amplified without limit: no cap ---
 # Z'' at 0.001% of |Z| reads as a residual in the tens of thousands of percent,

@@ -1,6 +1,6 @@
-#Export DRT output in the formats Scribner's ZView reads
-"""Write a DRT result as a ZView data file (.z), and its fitted peaks as a
-ZView equivalent-circuit model (.mdl).
+#Export analysis output in the formats Scribner's ZView reads
+"""Write measured and derived spectra as ZView data files (.z), and fitted DRT
+peaks as a ZView equivalent-circuit model (.mdl).
 
 Both formats were taken from the files ZView itself ships -- C:\\SAI\\ZData for
 the data files and C:\\SAI\\ZModels for the models -- rather than from a
@@ -40,9 +40,17 @@ def _z_num(value) -> str:
     return f"{mantissa}E{sign}{digits.zfill(4)}"
 
 
+def _z_text(text: str) -> str:
+    """One free-text header field, made safe to sit inside ZView's quotes: the
+    fields are quote-delimited and one per line, so an embedded quote or newline
+    would shift every line after it."""
+    return " ".join(str(text).replace('"', "'").split())
+
+
 def _z_row(frequency, z_real, z_imag, index: int) -> str:
-    """One data line. Ampl, Bias, GD, Err and Range have no meaning for a DRT,
-    so they are zero; Time carries the row number, as in ZView's demo files."""
+    """One data line. Ampl, Bias, GD, Err and Range are not recorded by anything
+    this app exports, so they are zero; Time carries the row number, as in
+    ZView's demo files."""
     fields = [
         _z_num(frequency),
         _z_num(0.0),  # Ampl
@@ -57,13 +65,20 @@ def _z_row(frequency, z_real, z_imag, index: int) -> str:
     return " " + ",  ".join(fields) + ", 0, 0"
 
 
-def _write_z(path: Path, rows: List[Tuple[float, float, float]], comment: str) -> Path:
+def _write_z(
+    path: Path,
+    rows: List[Tuple[float, float, float]],
+    comment: str,
+    source: str = "eis-batch-analysis",
+) -> Path:
     """Write the eleven-line header and the data block.
 
     The header length is fixed: ZView takes the point count from line 10 and
     the first data row from line 12, so no line here may be dropped or added.
-    Line 6 is the one free-text slot (ZView's own DEMO3.Z puts "Low frequencies
-    have been deleted" there), which is where the tau mapping is explained.
+    Line 5 names what produced the data (ZView's own DEMO1.Z carries "Solartron
+    12601 Test Module" there) and line 6 is the one free-text slot (DEMO3.Z puts
+    "Low frequencies have been deleted" in it), which is where each writer below
+    says what its columns actually hold.
     """
     frequencies = [row[0] for row in rows] or [0.0]
     now = datetime.now()
@@ -74,8 +89,8 @@ def _write_z(path: Path, rows: List[Tuple[float, float, float]], comment: str) -
         '"Sweep Frequency: Control Voltage"',
         # The stray inner quote is ZView's, not a typo -- its files all carry it.
         f'"Date: {now.month}-{now.day}-{now.year}     "Time: {now.hour}:{now.minute}:{now.second}"',
-        '"eis-batch-analysis: distribution of relaxation times"',
-        f'"{comment}"',
+        f'"{_z_text(source)}"',
+        f'"{_z_text(comment)}"',
         f'"{path.name}"',
         '"Frequency"',
         f"0,2,0,1,{min(frequencies):.6G},{max(frequencies):.6G}",
@@ -93,37 +108,111 @@ def _write_z(path: Path, rows: List[Tuple[float, float, float]], comment: str) -
     return path
 
 
+def _impedance_rows(frequencies, impedances) -> List[Tuple[float, float, float]]:
+    """(f, Z', Z'') rows, highest frequency first.
+
+    Z'' keeps its sign rather than being negated: ZView's own files put the raw
+    imaginary part in the Z''(b) column -- DEMO1.Z opens at -6.670100E+0000 on a
+    capacitive sweep -- and ZView flips it itself when plotting -Z''.
+
+    The descending sort is the order ZView writes, and matters because ZView
+    joins consecutive rows when it draws a line; an out-of-order sweep comes out
+    as a zigzag rather than an arc.
+    """
+    frequencies = np.asarray(frequencies, dtype=float)
+    impedances = np.asarray(impedances, dtype=complex)
+    order = np.argsort(frequencies)[::-1]
+    return [
+        (float(frequencies[i]), float(impedances[i].real), float(impedances[i].imag))
+        for i in order
+    ]
+
+
+def write_spectrum_z(
+    path: Path, dataset: EISDataset, kept_only: bool = True, comment: str = ""
+) -> Path:
+    """A measured spectrum as a ZView data file -- the whole point of which is
+    that ZView can then fit an equivalent circuit to it.
+
+    kept_only writes the points that survived masking, which is what makes this
+    an "after validation" export: the rejected points are simply absent from the
+    file, so ZView never sees them. Pass False to write the sweep as measured.
+
+    comment goes in the file's one free-text header line; the caller passes what
+    was rejected and why, since this module knows nothing about validation.
+    """
+    masked = False if kept_only else None
+    rows = _impedance_rows(
+        dataset.data.get_frequencies(masked=masked),
+        dataset.data.get_impedances(masked=masked),
+    )
+    if not rows:
+        raise ValueError(
+            "Every point in this sweep is masked, so there is nothing to write."
+        )
+    return _write_z(
+        Path(path),
+        rows,
+        comment or "measured impedance, masked points removed",
+        source=f"eis-batch-analysis: {dataset.full_label}",
+    )
+
+
+def write_validation_fit_z(path: Path, result, comment: str = "") -> Path:
+    """A validation result's reconstructed impedance as a ZView data file.
+
+    That is the lin-KK model's response, or the modulus Z-HIT rebuilt from the
+    phase -- the curve the measured points are judged against.
+
+    Written on the frequencies the validation was *fitted* on, which need not be
+    the ones write_spectrum_z keeps: a single-pass run fits everything and only
+    then rejects, so the fit still spans the points the threshold took out. That
+    is deliberate -- in ZView the fit is then drawn straight through the gaps the
+    spectrum has, which is what makes a rejected point look rejected.
+
+    The residuals themselves are not written: ZView has no column for them, and
+    they would have to be smuggled into Z' the way write_drt_z smuggles gamma.
+    Export the CSV for those.
+    """
+    rows = _impedance_rows(result.get_frequencies(), result.get_impedances())
+    return _write_z(
+        Path(path),
+        rows,
+        comment or "reconstructed impedance from the validation fit",
+        source="eis-batch-analysis: validation fit",
+    )
+
+
 def write_drt_z(path: Path, result) -> Path:
     """A DRT curve as a ZView data file.
 
     ZView has no notion of a distribution, so the curve is carried in the
     columns it does understand: tau becomes a frequency through
     f = 1/(2*pi*tau), and gamma is written into Z'(a) with Z''(b) left at zero.
-    Plotting Z' against frequency in ZView then reproduces the DRT. A BHT
-    result has a real and an imaginary distribution, and those go into Z'(a)
-    and Z''(b) respectively.
+    Plotting Z' against frequency in ZView then reproduces the DRT.
 
     Credible intervals have nowhere to go in this format; export the CSV
     instead if they are needed.
     """
-    data = result.get_drt_data()
-    taus = np.asarray(data[0], dtype=float)
+    taus, gammas = result.get_drt_data()
+    taus = np.asarray(taus, dtype=float)
     # tau ascending gives frequency descending, which is the order ZView's own
     # files are written in.
     frequencies = 1.0 / (2.0 * np.pi * taus)
 
-    if len(data) == 3:  # BHT: separate real and imaginary distributions
-        gamma_real, gamma_imag = np.asarray(data[1]), np.asarray(data[2])
-        comment = "gamma_re in Z'(a), gamma_im in Z''(b); f = 1/(2*pi*tau)"
-    else:
-        gamma_real, gamma_imag = np.asarray(data[1]), np.zeros_like(taus)
-        comment = "gamma(tau) [ohm] in the Z'(a) column; f = 1/(2*pi*tau)"
+    gamma_real, gamma_imag = np.asarray(gammas), np.zeros_like(taus)
+    comment = "gamma(tau) [ohm] in the Z'(a) column; f = 1/(2*pi*tau)"
 
     rows = [
         (float(f), float(re), float(im))
         for f, re, im in zip(frequencies, gamma_real, gamma_imag)
     ]
-    return _write_z(Path(path), rows, comment)
+    return _write_z(
+        Path(path),
+        rows,
+        comment,
+        source="eis-batch-analysis: distribution of relaxation times",
+    )
 
 
 # ---- equivalent-circuit model ----

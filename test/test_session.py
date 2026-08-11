@@ -1,7 +1,7 @@
 import numpy as np
 from pyimpspec import DataSet
 
-from core.drt import analyze_drt_peaks, run_drt, run_drt_bht
+from core.drt import analyze_drt_peaks, run_drt
 from core.io_utils import EISDataset
 from core.session import _GZIP_MAGIC, load_session, save_session, ui_state_to_dict
 from core.validation import run_kk_test, run_zhit
@@ -19,7 +19,6 @@ dataset.data.set_mask({0: True})  # exercise mask round-trip too
 kk_result = run_kk_test(dataset)
 zhit_result = run_zhit(dataset)
 drt_result = run_drt(dataset)
-bht_result = run_drt_bht(dataset, num_samples=200, num_attempts=2)
 peaks_result = analyze_drt_peaks(drt_result)
 
 validation_results = {("kk", dataset.key): kk_result, ("zhit", dataset.key): zhit_result}

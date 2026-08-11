@@ -30,6 +30,7 @@ from gui.steps.base import (
     compact_combo,
     group_box,
     group_form,
+    mirror_row_tooltips,
     quiet_group,
     section_label,
     set_row_enabled,
@@ -62,37 +63,45 @@ class DRTStep(StepPage):
 
         settings_box, form = group_form(
             "DRT Settings",
-            "Applied to each selected sweep's currently unmasked points. "
+            "Applied to each selected sweep's currently unmasked points.\n "
             "Settings the chosen method does not use are greyed out.",
         )
         self._form = form
 
         # First, because it decides which of the rows below matter; see
         # _sync_relevance.
-        method = SegmentedControl(["TR-RBF", "Bayesian", "BHT"])
+        method = SegmentedControl(["TR-RBF", "Bayesian"])
         # Named *_radio though they are QToolButtons: same QAbstractButton API,
         # and MainWindow._wire_steps reaches them by these names.
         self.trrbf_radio = method.button(0)
         self.trrbf_radio.setToolTip(
-            "Tikhonov regularisation with radial basis function discretisation. "
-            "Fast, deterministic point estimate — the usual choice."
+            "Tikhonov Regularization-Radial Basis Function"
         )
         self.bayesian_radio = method.button(1)
         self.bayesian_radio.setToolTip(
-            "TR-RBF plus Bayesian credible intervals by HMC sampling. Same "
-            "distribution, with an uncertainty band — but minutes to hours per "
-            "sweep, so it runs in the background."
+            "TR-RBF with Bayesian credible intervals by Hamiltonian Monte Carlo "
+            "sampling. Computationally expensive.\n\n"
+            "The interval is what this method adds: the DRT plot gains a shaded "
+            "99% band and a dashed posterior mean in the sweep's own colour, and "
+            "a CSV export gains three columns for them."
         )
-        self.bht_radio = method.button(2)
-        self.bht_radio.setToolTip(
-            "Bayesian Hilbert Transform: fits the real and imaginary parts "
-            "separately and scores how well they agree, giving a "
-            "Kramers-Kronig-style consistency check alongside the DRT. Uses "
-            "neither λ nor the impedance-part and inductance settings."
+        # On the control, so the "Method" label has something to mirror; the
+        # two buttons keep their own, which win over this one on hover.
+        method.setToolTip(
+            "Which solver computes the distribution. Both fit the same "
+            "TR-RBF model; Bayesian adds an uncertainty band at a large "
+            "cost in run time."
         )
         form.addRow("Method", method)
 
-        form.addRow(section_label("Discretisation"))
+        form.addRow(
+            section_label(
+                "Discretisation",
+                "How the continuous distribution is represented numerically "
+                "before it is fitted: the basis function each collocation "
+                "point contributes, and which part of the impedance is used.",
+            )
+        )
 
         self.rbf_combo = compact_combo(QComboBox())
         add_combo_items(self.rbf_combo, [(_titleize(v), v) for v in RBF_TYPES])
@@ -143,7 +152,15 @@ class DRTStep(StepPage):
         # label/value pair.
         form.addRow(self.inductance_check)
 
-        form.addRow(section_label("Regularisation"))
+        form.addRow(
+            section_label(
+                "Regularisation",
+                "The smoothness penalty that keeps the inversion stable. "
+                "Which derivative of the distribution is penalised, and how "
+                "strongly (λ) — the main trade-off between resolving peaks "
+                "and amplifying noise.",
+            )
+        )
 
         self.derivative_combo = compact_combo(QComboBox())
         add_combo_items(self.derivative_combo, [("1st order", 1), ("2nd order", 2)])
@@ -188,7 +205,12 @@ class DRTStep(StepPage):
         )
         form.addRow("λ", self.lambda_spin)
 
-        self._shape_header = section_label("RBF Shape")
+        self._shape_header = section_label(
+            "RBF Shape",
+            "How wide each radial basis function is, which sets the finest "
+            "detail the distribution can carry. Ignored when the basis "
+            "function is Piecewise Linear, which uses none.",
+        )
         form.addRow(self._shape_header)
 
         # Paired on one row: the combo decides whether the spinbox is an FWHM
@@ -211,9 +233,24 @@ class DRTStep(StepPage):
         self.shape_coeff_spin.setValue(0.5)
         shape_layout.addWidget(self.shape_coeff_spin)
         self._shape_row = shape_row
+        # On the container, not the two children: it is the row's field widget,
+        # so this is what mirror_row_tooltips copies onto the "Shape control"
+        # label, and hovering either control shows it.
+        shape_row.setToolTip(
+            "How the width beside it is specified. 'FWHM coefficient' sets the "
+            "full width at half maximum as a fraction of the spacing between "
+            "adjacent time constants, \n so the shape follows the frequency grid; "
+            "'Shape factor' sets the basis function's own width parameter "
+            "directly. Smaller widths resolve more peaks and admit more noise."
+        )
         form.addRow("Shape control", shape_row)
 
-        self._sampling_header = section_label("Sampling")
+        self._sampling_header = section_label(
+            "Sampling",
+            "Monte Carlo draws behind the Bayesian credible intervals. Plain "
+            "TR-RBF is a point estimate and does no sampling, so these rows "
+            "grey out for it.",
+        )
         form.addRow(self._sampling_header)
 
         self.num_samples_spin = QSpinBox()
@@ -222,9 +259,8 @@ class DRTStep(StepPage):
         self.num_samples_spin.setSingleStep(500)
         self.num_samples_spin.setValue(1000)
         self.num_samples_spin.setToolTip(
-            "Draws used for the credible intervals (Bayesian) or the "
-            "real/imaginary DRTs (BHT). Must be >= 1000; more is more accurate "
-            "and slower. Plain TR-RBF does no sampling."
+            "Draws used for the credible intervals (Bayesian). Must be >= 1000; "
+            "more is more accurate and slower. Plain TR-RBF does no sampling."
         )
         form.addRow("Samples", self.num_samples_spin)
 
@@ -236,10 +272,13 @@ class DRTStep(StepPage):
         self.timeout_spin.setToolTip(
             "The Bayesian credible-interval sampler can be extremely slow "
             "(tens of minutes for even modest sweeps). It aborts once this "
-            "many seconds pass; 0 disables the limit entirely. BHT takes no "
-            "timeout."
+            "many seconds pass; 0 disables the limit entirely."
         )
         form.addRow("Timeout [s]", self.timeout_spin)
+        # After the last row: the labels addRow() builds from a string have no
+        # tooltip, so hovering "Basis function" or "λ selection" would show the
+        # card's tooltip instead of the setting's.
+        mirror_row_tooltips(form)
         self.add_settings(settings_box)
 
         run_box, run_layout = group_box("Run DRT")
@@ -261,7 +300,7 @@ class DRTStep(StepPage):
         self.optimal_lambda_label.setToolTip(
             "The regularisation strength the most recent run actually used — "
             "the optimised value when λ selection is not 'Custom'. Shown when "
-            "exactly one sweep is selected. BHT does not use λ."
+            "exactly one sweep is selected."
         )
         self.optimal_lambda_label.setProperty("state", "muted")
         lambda_row.addWidget(self.optimal_lambda_label, stretch=1)
@@ -269,7 +308,7 @@ class DRTStep(StepPage):
         self.add_settings(run_box)
 
         peak_box, peak_layout = group_box(
-            "Peak Deconvolution",
+            "Peak Extraction",
             "Fits individual (skew) normal peaks to the most recently "
             "computed DRT result for each selected sweep.",
         )
@@ -285,9 +324,10 @@ class DRTStep(StepPage):
             "Number of peaks to fit. 0 analyses every detected peak."
         )
         peak_form.addRow("Peaks", self.num_peaks_spin)
+        mirror_row_tooltips(peak_form)
         peak_layout.addLayout(peak_form)
 
-        self.run_peak_analysis_button = QPushButton("Run deconvolution")
+        self.run_peak_analysis_button = QPushButton("Run peak extraction")
         self.run_peak_analysis_button.setProperty("variant", "secondary")
         peak_layout.addWidget(self.run_peak_analysis_button)
 
@@ -354,7 +394,7 @@ class DRTStep(StepPage):
 
         # The three settings that decide whether other rows apply. Kept inside
         # the step: this is presentation, and MainWindow never needs to know.
-        for control in (self.trrbf_radio, self.bayesian_radio, self.bht_radio):
+        for control in (self.trrbf_radio, self.bayesian_radio):
             control.toggled.connect(self._sync_relevance)
         self.rbf_combo.currentIndexChanged.connect(self._sync_relevance)
         self.cv_combo.currentIndexChanged.connect(self._sync_relevance)
@@ -362,11 +402,9 @@ class DRTStep(StepPage):
 
     @property
     def method(self) -> str:
-        """"trrbf", "bayesian" or "bht" -- which calculation Run DRT performs.
-        Also decides which settings apply; see _sync_relevance."""
-        if self.trrbf_radio.isChecked():
-            return "trrbf"
-        return "bayesian" if self.bayesian_radio.isChecked() else "bht"
+        """"trrbf" or "bayesian" -- which calculation Run DRT performs. Also
+        decides which settings apply; see _sync_relevance."""
+        return "trrbf" if self.trrbf_radio.isChecked() else "bayesian"
 
     def _sync_relevance(self) -> None:
         """Grey out the settings the current choices make inert, so the panel
@@ -374,24 +412,12 @@ class DRTStep(StepPage):
 
         Every rule here is a property of pyimpspec's API, not a house style:
 
-        - BHT takes no mode, inductance, cross_validation or lambda_value
-          argument at all (calculate_drt_bht's signature has none of them).
         - Plain TR-RBF passes credible_intervals=False, and num_samples/timeout
           are read only inside the credible-interval branch.
-        - timeout belongs to the credible-interval sampler alone; BHT has no
-          such parameter.
         - Piecewise-linear discretisation short-circuits _compute_epsilon to
           0.0, so rbf_shape and shape_coeff are discarded whatever they say.
         """
         form = self._form
-        method = self.method
-        trrbf_family = method in ("trrbf", "bayesian")
-
-        set_row_enabled(form, self.mode_combo, trrbf_family)
-        self.inductance_check.setEnabled(trrbf_family)
-        set_row_enabled(form, self.cv_combo, trrbf_family)
-        set_row_enabled(form, self.lambda_spin, trrbf_family)
-        self._lambda_readout.setEnabled(trrbf_family)
 
         # λ is not inert once a cross-validation method is chosen -- it becomes
         # that optimiser's starting value -- so it is relabelled, not greyed.
@@ -406,7 +432,7 @@ class DRTStep(StepPage):
         set_row_enabled(form, self._shape_row, shaped)
 
         # The header follows its rows: TR-RBF leaves both of them inert.
-        samples = method in ("bayesian", "bht")
+        samples = self.method == "bayesian"
         self._sampling_header.setEnabled(samples)
         set_row_enabled(form, self.num_samples_spin, samples)
-        set_row_enabled(form, self.timeout_spin, method == "bayesian")
+        set_row_enabled(form, self.timeout_spin, samples)

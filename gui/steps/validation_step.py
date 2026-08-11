@@ -69,17 +69,7 @@ class ValidationStep(StepPage):
 
         valid_box, valid_form = group_form(
             "Validation",
-            "Kramers-Kronig checks linearity/causality via a lin-KK fit, on "
-            "the impedance representation only — fitting the admittance "
-            "representation as well costs roughly 3x the time and mainly "
-            "helps spectra with negative differential resistance. "
-            "Z-HIT reconstructs the modulus from the phase data and is good "
-            "at catching non-steady-state artifacts such as low-frequency "
-            "drift; it is also far quicker, since it does no model fitting.\n\n"
-            "Residuals sets which convention a residual is quoted in. That is "
-            "not a display setting: the limits reject on whichever is chosen, "
-            "so the dashed limit lines on the plot always mark the points that "
-            "went.",
+            "Kramers-Kronig or Z-HIT.",
         )
         method = SegmentedControl(["Kramers-Kronig", "Z-HIT"])
         # Named *_radio though they are QToolButtons: same QAbstractButton
@@ -102,35 +92,21 @@ class ValidationStep(StepPage):
 
         self.threshold_spin = _percent_spin(2.0)
         self.threshold_spin.setToolTip(
-            "Outlier threshold. Points whose relative residual (real or "
-            "imaginary) exceeds this percentage are removed.\n\n"
-            "What counts as the relative residual is set by Residuals below.\n\n"
-            "Also frames the residual plot: the axis runs 5 points past this, "
-            "and residuals above that are pinned to the edge as 'off scale' "
-            "rather than being allowed to flatten the rest of the figure."
+            "Outlier threshold. Points with relative residuals exceeding this percentage are removed."
         )
         valid_form.addRow("Threshold [%]", self.threshold_spin)
 
         self.soft_limit_spin = _percent_spin(2.0)
         self.soft_limit_spin.setToolTip(
-            "Where the iteration stops. Points above this but below the hard "
-            "limit are removed one per pass, worst first, until none are left "
-            "above it.\n\n"
-            "Only read when a run starts — changing it does not re-prune "
-            "what is already on screen."
+            "The worst point between the soft and hard limit is removed. \n"
+            "Validation is repeated again until no points fall between the soft \n"
+            "and hard limits or until a maximum number of run set below."
         )
         valid_form.addRow("Soft limit [%]", self.soft_limit_spin)
 
         self.hard_limit_spin = _percent_spin(5.0)
         self.hard_limit_spin.setToolTip(
-            "Points above this are removed immediately, however many there "
-            "are, and re-checked on every pass. Must be at or above the soft "
-            "limit.\n\n"
-            "This and the soft limit are both read under the convention set by "
-            "Residuals below.\n\n"
-            "Being the higher of the two, this one frames the residual plot: "
-            "the axis runs 5 points past it, and residuals above that are "
-            "pinned to the edge as 'off scale'."
+            "All points above the hard limit are removed immediately."
         )
         valid_form.addRow("Hard limit [%]", self.hard_limit_spin)
 
@@ -139,44 +115,22 @@ class ValidationStep(StepPage):
         self.max_removed_spin.setMaximum(200)
         self.max_removed_spin.setValue(10)
         self.max_removed_spin.setToolTip(
-            "How many points the loop may remove before giving up, so a "
-            "spectrum that never settles cannot cost an unbounded number of "
-            "re-validations. It stops just short of exceeding this and says "
-            "so; a sweep is also never pruned below 8 points.\n\n"
-            "Not a cap on what you end up losing: whatever is still over the "
-            "hard limit when the loop stops is rejected anyway, as it would "
-            "be in Basic mode."
+            "How many points the loop may remove before stopping to \n"
+            "to prevent crashing."
         )
         valid_form.addRow("Max removed", self.max_removed_spin)
 
         # Last of the settings the run reads, and directly under the limits it
         # governs: whichever convention is picked here is the one they reject
         # on, whether that is the Basic threshold or the Advanced pair above.
-        definition = SegmentedControl(["ΔZ / |Z|", "ΔZ′ / |Z′|"])
+        definition = SegmentedControl(["ΔZ / |Z|", "ΔZ′ / Z′"])
         self.residual_modulus_radio = definition.button(0)
         self.residual_modulus_radio.setToolTip(
-            "Both parts against the modulus: ΔZ′/|Z| and ΔZ″/|Z|.\n\n"
-            "What pyimpspec reports (Schönleber et al. 2014) and what the "
-            "exported residual CSVs contain. One scale for both parts, so a "
-            "point's real and imaginary residuals are directly comparable."
+            "Residuals defined as: ΔZ′/|Z| and ΔZ″/|Z|."
         )
         self.residual_component_radio = definition.button(1)
         self.residual_component_radio.setToolTip(
-            "Each part against its own magnitude: ΔZ′/|Z′| and ΔZ″/|Z″|.\n\n"
-            "Reads the error on a part as a fraction of that part, and is "
-            "uncapped: wherever a component is small the ratio grows without "
-            "limit, so points whose real or imaginary part is not resolved "
-            "above the noise are rejected.\n\n"
-            "Expect that to bite hardest where Z″ passes through zero — "
-            "entering the inductive tail, and again as an arc closes back "
-            "onto the real axis. Far more points go than under ΔZ/|Z| at the "
-            "same percentage; the two are not on a comparable scale, so set "
-            "the limits above to suit this one.\n\n"
-            "A part measuring at or near zero gives an enormous residual. The "
-            "point is rejected, and appears on the plot as an 'off scale' "
-            "marker at the edge rather than at its own value.\n\n"
-            "Exported residual CSVs stay in the ΔZ/|Z| form either way — that "
-            "is the interchange convention."
+            "Residuals defined as: ΔZ′/Z′ and ΔZ″/Z″."
         )
         valid_form.addRow("Residuals", definition)
 
@@ -208,6 +162,13 @@ class ValidationStep(StepPage):
         self._clamp_limits()
 
         export_box, export_layout = quiet_group()
+        self.export_results_button = QPushButton("Export validated data…")
+        self.export_results_button.setProperty("variant", "quiet")
+        self.export_results_button.setToolTip(
+            "Export as .csv or .z"
+        )
+        export_layout.addWidget(self.export_results_button)
+
         self.export_image_button = QPushButton("Save spectrum as image…")
         self.export_image_button.setProperty("variant", "quiet")
         export_layout.addWidget(self.export_image_button)

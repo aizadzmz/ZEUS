@@ -24,7 +24,190 @@ from core.plotting import point_tip
 HOVER_DELAY_MS = 150
 
 
-class PgFigurePane(QWidget):
+class _PointMetadataMixin:
+    """The metadata box a plotted point shows on hover or on click.
+
+    Shared by both panes below: the box, the hover delay and the fitting that
+    keeps it inside the plotted area are the same wherever points are
+    hoverable, and only what a *click* means differs -- see
+    _claim_point_click, which PgFigurePane overrides for its eraser.
+
+    A host is a QWidget that keeps its PlotWidget in self._widget. It calls
+    _init_point_metadata() from __init__, _connect_point_metadata(widget) once
+    a widget is in place, _reset_point_metadata() when clearing one, and
+    _fit_tooltip_inside_plot() whenever the view moves under a placed box.
+    """
+
+    def _init_point_metadata(self) -> None:
+        # The metadata box shown on hover or click (see _show_tooltip);
+        # cleared on click-elsewhere so at most one is ever shown. Its point is
+        # kept alongside it so the box can be re-fitted to the plot when the
+        # view moves under it.
+        self._tooltip_item: Optional[pg.TextItem] = None
+        self._tooltip_anchor: Optional[Tuple[float, float]] = None
+
+        # True once a click has pinned the box open; hover then leaves it
+        # alone until the user clicks empty space (see _on_point_hovered).
+        self._pinned = False
+
+        # Hover shows the box only after the cursor rests on a point for
+        # HOVER_DELAY_MS, so brief mouse-overs while panning don't flash it.
+        # (x, y, text, container) -- see _show_tooltip for the container.
+        self._pending_hover: Optional[Tuple[float, float, str, object]] = None
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.setInterval(HOVER_DELAY_MS)
+        self._hover_timer.timeout.connect(self._show_pending_hover)
+
+    def _connect_point_metadata(self, widget: pg.PlotWidget) -> None:
+        """Subscribe to the hoverable series a builder left on the widget."""
+        for item in getattr(widget, "interactive_items", []):
+            item.sigClicked.connect(self._on_point_clicked)
+            item.sigHovered.connect(self._on_point_hovered)
+        widget.getPlotItem().scene().sigMouseClicked.connect(self._on_scene_clicked)
+
+    def _reset_point_metadata(self) -> None:
+        """Drop a box along with the widget it was drawn on. No removeItem: the
+        caller is about to delete that widget and take the box with it."""
+        self._hover_timer.stop()
+        self._pending_hover = None
+        self._pinned = False
+        self._tooltip_item = None
+        self._tooltip_anchor = None
+
+    def _claim_point_click(self, point) -> bool:
+        """Hook for a pane that wants clicks to mean something other than
+        "show me this point". Returning True suppresses the box."""
+        return False
+
+    def _on_point_clicked(self, plot, points, ev) -> None:
+        """Connected to each series' ScatterPlotItem.sigClicked. Pins a
+        metadata box at the clicked point until a click elsewhere."""
+        if not len(points):
+            return
+        self._hover_timer.stop()
+        self._pending_hover = None
+        point = points[0]
+
+        if self._claim_point_click(point):
+            return
+
+        x, y = point.pos().x(), point.pos().y()
+        self._show_tooltip(x, y, point_tip(point.data()), pinned=True, container=plot.getViewBox())
+
+    def _on_scene_clicked(self, ev) -> None:
+        """Connected to the scene's sigMouseClicked; un-pins and hides the box
+        when a click misses every point."""
+        if ev.isAccepted():
+            return
+        self._pinned = False
+        self._hide_tooltip()
+
+    def _on_point_hovered(self, plot, points, ev) -> None:
+        """Connected to each series' ScatterPlotItem.sigHovered. A pinned box
+        takes priority; otherwise this starts the hover delay."""
+        if self._pinned:
+            return
+        if len(points):
+            point = points[0]
+            x, y = point.pos().x(), point.pos().y()
+            self._pending_hover = (x, y, point_tip(point.data()), plot.getViewBox())
+            self._hover_timer.start()
+        else:
+            self._hover_timer.stop()
+            self._pending_hover = None
+            self._hide_tooltip()
+
+    def _show_pending_hover(self) -> None:
+        if self._pinned or self._pending_hover is None:
+            return
+        x, y, text, container = self._pending_hover
+        self._show_tooltip(x, y, text, pinned=False, container=container)
+
+    def _show_tooltip(
+        self, x: float, y: float, text: str, pinned: bool, container=None
+    ) -> None:
+        """Show the metadata box for a point at (x, y) in container's
+        coordinates, translated through the scene onto the PlotItem."""
+        if self._widget is None:
+            return
+        self._hide_tooltip()
+        item = pg.TextItem(
+            text,
+            color=(20, 20, 20),
+            anchor=(0, 1),
+            border=pg.mkPen("#808080"),
+            fill=pg.mkBrush(255, 255, 255, 230),
+        )
+        plot_item = self._widget.getPlotItem()
+        main_view = plot_item.getViewBox()
+        if container is not None and container is not main_view:
+            point = main_view.mapSceneToView(container.mapViewToScene(QPointF(x, y)))
+            x, y = point.x(), point.y()
+        item.setPos(x, y)
+        plot_item.addItem(item, ignoreBounds=True)
+        self._tooltip_item = item
+        self._tooltip_anchor = (x, y)
+        self._pinned = pinned
+        self._fit_tooltip_inside_plot()
+
+    def _fit_tooltip_inside_plot(self) -> None:
+        """Keep the whole metadata box inside the plotted area.
+
+        The box is a fixed-size overlay hung off a data point, so near an edge
+        it used to run under the axis or the legend and get cropped. Two steps:
+        open it towards whichever side has room, and if it still does not fit
+        -- a box wider than the space either side of the point -- push it back
+        in. That last step breaks the tie to the point, which beats being
+        cropped by it.
+        """
+        item, anchor = self._tooltip_item, self._tooltip_anchor
+        if item is None or anchor is None or self._widget is None:
+            return
+        view = self._widget.getPlotItem().getViewBox()
+        area = view.sceneBoundingRect()
+        card = item.boundingRect()
+        x, y = anchor
+        at = view.mapViewToScene(QPointF(x, y))
+        pad = 6.0
+
+        # A box wider than the plot cannot be fitted by moving it, so cap it
+        # and let the text wrap. Only ever a long file name in the label; the
+        # numbers below it are short.
+        limit = area.width() - 2 * pad
+        if limit > 0 and card.width() > limit:
+            item.setTextWidth(limit)
+            card = item.boundingRect()
+
+        # anchor=(0, 1) puts the box's bottom-left on the point, so by default
+        # it opens right and up; 1 and 0 flip those.
+        open_left = at.x() + card.width() + pad > area.right()
+        if open_left and at.x() - card.width() - pad < area.left():
+            open_left = False  # no room either way; the clamp below handles it
+        open_down = at.y() - card.height() - pad < area.top()
+        if open_down and at.y() + card.height() + pad > area.bottom():
+            open_down = False
+        item.setAnchor((1.0 if open_left else 0.0, 0.0 if open_down else 1.0))
+
+        left = at.x() - card.width() if open_left else at.x()
+        top = at.y() if open_down else at.y() - card.height()
+        dx = min(0.0, (area.right() - pad) - (left + card.width()))
+        dx = max(dx, (area.left() + pad) - left) if left + dx < area.left() + pad else dx
+        dy = min(0.0, (area.bottom() - pad) - (top + card.height()))
+        dy = max(dy, (area.top() + pad) - top) if top + dy < area.top() + pad else dy
+        if dx or dy:
+            # Scene pixels back into view units; scene y runs downwards.
+            px, py = view.viewPixelSize()
+            item.setPos(x + dx * px, y - dy * py)
+
+    def _hide_tooltip(self) -> None:
+        if self._tooltip_item is not None and self._widget is not None:
+            self._widget.getPlotItem().removeItem(self._tooltip_item)
+        self._tooltip_item = None
+        self._tooltip_anchor = None
+
+
+class PgFigurePane(_PointMetadataMixin, QWidget):
     """Hosts a single PlotWidget with optional Replot / Auto-Scale overlay
     buttons. Removed points hide via the "Removed" legend swatch."""
 
@@ -80,25 +263,7 @@ class PgFigurePane(QWidget):
         # apply and land the new plot off-screen.
         self._range_key: Optional[str] = None
 
-        # The metadata box shown on hover or click (see _show_tooltip);
-        # cleared on click-elsewhere so at most one is ever shown. Its point is
-        # kept alongside it so the box can be re-fitted to the plot when the
-        # view moves under it.
-        self._tooltip_item: Optional[pg.TextItem] = None
-        self._tooltip_anchor: Optional[Tuple[float, float]] = None
-
-        # True once a click has pinned the box open; hover then leaves it
-        # alone until the user clicks empty space (see _on_point_hovered).
-        self._pinned = False
-
-        # Hover shows the box only after the cursor rests on a point for
-        # HOVER_DELAY_MS, so brief mouse-overs while panning don't flash it.
-        # (x, y, text, container) -- see _show_tooltip for the container.
-        self._pending_hover: Optional[Tuple[float, float, str, object]] = None
-        self._hover_timer = QTimer(self)
-        self._hover_timer.setSingleShot(True)
-        self._hover_timer.setInterval(HOVER_DELAY_MS)
-        self._hover_timer.timeout.connect(self._show_pending_hover)
+        self._init_point_metadata()
 
     def _build_overlay(self, with_eraser: bool) -> None:
         overlay = QWidget(self)
@@ -260,7 +425,13 @@ class PgFigurePane(QWidget):
         back to the default framing when every point is masked."""
         if self._widget is None:
             return
-        bounds = self._widget.kept_range or self._widget.full_range
+        # getattr, not attribute access: a PlotWidget forwards an unknown name
+        # to its PlotItem and raises AttributeError, so a figure built without
+        # these -- the button is on every pane, the attributes are set per
+        # builder -- would bring the window down rather than do nothing.
+        bounds = getattr(self._widget, "kept_range", None) or getattr(
+            self._widget, "full_range", None
+        )
         if bounds is None:
             return
         xlo, xhi, ylo, yhi = bounds
@@ -334,137 +505,17 @@ class PgFigurePane(QWidget):
             return
         self._widget.setCursor(Qt.CrossCursor if self._eraser else Qt.ArrowCursor)
 
-    def _on_point_clicked(self, plot, points, ev) -> None:
-        """Connected to each series' ScatterPlotItem.sigClicked. Pins a
-        metadata box at the clicked point until a click elsewhere."""
-        if not len(points):
-            return
-        self._hover_timer.stop()
-        self._pending_hover = None
-        point = points[0]
-
-        if self._eraser:
-            # No box: the owner is about to replot with this point moved
-            # between the kept and removed series, so a pinned tooltip would be
-            # stale immediately.
-            self._hide_tooltip()
-            data = point.data()
-            self.point_mask_toggled.emit(data["key"], data["index"])
-            return
-
-        x, y = point.pos().x(), point.pos().y()
-        self._show_tooltip(x, y, point_tip(point.data()), pinned=True, container=plot.getViewBox())
-
-    def _on_scene_clicked(self, ev) -> None:
-        """Connected to the scene's sigMouseClicked; un-pins and hides the box
-        when a click misses every point."""
-        if ev.isAccepted():
-            return
-        self._pinned = False
+    def _claim_point_click(self, point) -> bool:
+        """With the eraser armed a click masks the point instead of describing
+        it -- no box, because the owner is about to replot with this point
+        moved between the kept and removed series and a pinned box would be
+        stale immediately."""
+        if not self._eraser:
+            return False
         self._hide_tooltip()
-
-    def _on_point_hovered(self, plot, points, ev) -> None:
-        """Connected to each series' ScatterPlotItem.sigHovered. A pinned box
-        takes priority; otherwise this starts the hover delay."""
-        if self._pinned:
-            return
-        if len(points):
-            point = points[0]
-            x, y = point.pos().x(), point.pos().y()
-            self._pending_hover = (x, y, point_tip(point.data()), plot.getViewBox())
-            self._hover_timer.start()
-        else:
-            self._hover_timer.stop()
-            self._pending_hover = None
-            self._hide_tooltip()
-
-    def _show_pending_hover(self) -> None:
-        if self._pinned or self._pending_hover is None:
-            return
-        x, y, text, container = self._pending_hover
-        self._show_tooltip(x, y, text, pinned=False, container=container)
-
-    def _show_tooltip(
-        self, x: float, y: float, text: str, pinned: bool, container=None
-    ) -> None:
-        """Show the metadata box for a point at (x, y) in container's
-        coordinates, translated through the scene onto the PlotItem."""
-        if self._widget is None:
-            return
-        self._hide_tooltip()
-        item = pg.TextItem(
-            text,
-            color=(20, 20, 20),
-            anchor=(0, 1),
-            border=pg.mkPen("#808080"),
-            fill=pg.mkBrush(255, 255, 255, 230),
-        )
-        plot_item = self._widget.getPlotItem()
-        main_view = plot_item.getViewBox()
-        if container is not None and container is not main_view:
-            point = main_view.mapSceneToView(container.mapViewToScene(QPointF(x, y)))
-            x, y = point.x(), point.y()
-        item.setPos(x, y)
-        plot_item.addItem(item, ignoreBounds=True)
-        self._tooltip_item = item
-        self._tooltip_anchor = (x, y)
-        self._pinned = pinned
-        self._fit_tooltip_inside_plot()
-
-    def _fit_tooltip_inside_plot(self) -> None:
-        """Keep the whole metadata box inside the plotted area.
-
-        The box is a fixed-size overlay hung off a data point, so near an edge
-        it used to run under the axis or the legend and get cropped. Two steps:
-        open it towards whichever side has room, and if it still does not fit
-        -- a box wider than the space either side of the point -- push it back
-        in. That last step breaks the tie to the point, which beats being
-        cropped by it.
-        """
-        item, anchor = self._tooltip_item, self._tooltip_anchor
-        if item is None or anchor is None or self._widget is None:
-            return
-        view = self._widget.getPlotItem().getViewBox()
-        area = view.sceneBoundingRect()
-        card = item.boundingRect()
-        x, y = anchor
-        at = view.mapViewToScene(QPointF(x, y))
-        pad = 6.0
-
-        # A box wider than the plot cannot be fitted by moving it, so cap it
-        # and let the text wrap. Only ever a long file name in the label; the
-        # numbers below it are short.
-        limit = area.width() - 2 * pad
-        if limit > 0 and card.width() > limit:
-            item.setTextWidth(limit)
-            card = item.boundingRect()
-
-        # anchor=(0, 1) puts the box's bottom-left on the point, so by default
-        # it opens right and up; 1 and 0 flip those.
-        open_left = at.x() + card.width() + pad > area.right()
-        if open_left and at.x() - card.width() - pad < area.left():
-            open_left = False  # no room either way; the clamp below handles it
-        open_down = at.y() - card.height() - pad < area.top()
-        if open_down and at.y() + card.height() + pad > area.bottom():
-            open_down = False
-        item.setAnchor((1.0 if open_left else 0.0, 0.0 if open_down else 1.0))
-
-        left = at.x() - card.width() if open_left else at.x()
-        top = at.y() if open_down else at.y() - card.height()
-        dx = min(0.0, (area.right() - pad) - (left + card.width()))
-        dx = max(dx, (area.left() + pad) - left) if left + dx < area.left() + pad else dx
-        dy = min(0.0, (area.bottom() - pad) - (top + card.height()))
-        dy = max(dy, (area.top() + pad) - top) if top + dy < area.top() + pad else dy
-        if dx or dy:
-            # Scene pixels back into view units; scene y runs downwards.
-            px, py = view.viewPixelSize()
-            item.setPos(x + dx * px, y - dy * py)
-
-    def _hide_tooltip(self) -> None:
-        if self._tooltip_item is not None and self._widget is not None:
-            self._widget.getPlotItem().removeItem(self._tooltip_item)
-        self._tooltip_item = None
-        self._tooltip_anchor = None
+        data = point.data()
+        self.point_mask_toggled.emit(data["key"], data["index"])
+        return True
 
     def set_widget(self, widget: pg.PlotWidget) -> None:
         self.clear()
@@ -487,10 +538,7 @@ class PgFigurePane(QWidget):
         # legend. Follow the ViewBox instead of placing the buttons once.
         view_box.geometryChanged.connect(self._reposition_overlay)
 
-        for item in getattr(widget, "interactive_items", []):
-            item.sigClicked.connect(self._on_point_clicked)
-            item.sigHovered.connect(self._on_point_hovered)
-        widget.getPlotItem().scene().sigMouseClicked.connect(self._on_scene_clicked)
+        self._connect_point_metadata(widget)
 
         # The eraser mode outlives the widget it was set on, so tell the fresh
         # widget about it again.
@@ -523,11 +571,7 @@ class PgFigurePane(QWidget):
             self._collapse_button.hide()
 
     def clear(self) -> None:
-        self._hover_timer.stop()
-        self._pending_hover = None
-        self._pinned = False
-        self._tooltip_item = None
-        self._tooltip_anchor = None
+        self._reset_point_metadata()
         if self._message is not None:
             self._layout.removeWidget(self._message)
             self._message.deleteLater()
@@ -538,7 +582,7 @@ class PgFigurePane(QWidget):
             self._widget = None
 
 
-class PgSingleFigurePane(QWidget):
+class PgSingleFigurePane(_PointMetadataMixin, QWidget):
     """Holds at most one PlotWidget, filling whatever height it is given.
 
     Home of the residual figure. It replaced a scrolling stack of figures,
@@ -549,7 +593,8 @@ class PgSingleFigurePane(QWidget):
     Not a PgFigurePane: that one remembers its pan/zoom across replots, and the
     residual axis is framed from the current limits (see
     core.plotting.build_residuals_plot), so it has to re-frame when those
-    change or when the pager moves on.
+    change or when the pager moves on. The metadata boxes are shared, though --
+    a residual point answers the same questions as a Nyquist one.
     """
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -557,6 +602,7 @@ class PgSingleFigurePane(QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._widget: Optional[pg.PlotWidget] = None
+        self._init_point_metadata()
 
     def set_widget(self, widget: Optional[pg.PlotWidget]) -> None:
         """Show `widget`, or nothing at all when passed None."""
@@ -565,8 +611,22 @@ class PgSingleFigurePane(QWidget):
             return
         self._widget = widget
         self._layout.addWidget(widget)
+        self._connect_point_metadata(widget)
+
+        view_box = widget.getPlotItem().getViewBox()
+        # A box is placed against the view it was opened in, and both of these
+        # move it out from under it: the wheel rescales y, and the splitter
+        # above resizes the plot (which also re-lays the legend column, so the
+        # plotted area narrows after the fact). Re-fit rather than let an edge
+        # crop it.
+        view_box.sigRangeChanged.connect(self._on_range_changed)
+        view_box.geometryChanged.connect(self._fit_tooltip_inside_plot)
+
+    def _on_range_changed(self, *_) -> None:
+        self._fit_tooltip_inside_plot()
 
     def clear(self) -> None:
+        self._reset_point_metadata()
         if self._widget is not None:
             self._layout.removeWidget(self._widget)
             self._widget.deleteLater()

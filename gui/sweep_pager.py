@@ -26,9 +26,9 @@ class SweepPager(QWidget):
         # Metadata about the plot rather than part of it: muted, and a size
         # down from the body text.
         self.file_label = QLabel("—")
-        self.file_label.setToolTip("The file the sweep on screen came from.")
+        self.file_label.setToolTip("Sweep file.")
         self.set_label = QLabel("—")
-        self.set_label.setToolTip("Which sweep within that file.")
+        self.set_label.setToolTip("Sweep number.")
         row.addWidget(QLabel("File"))
         row.addWidget(self.file_label)
         row.addSpacing(style.PAGER_FIELD_GAP)
