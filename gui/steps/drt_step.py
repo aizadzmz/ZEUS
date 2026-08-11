@@ -39,6 +39,76 @@ from gui.steps.base import (
 from gui.sweep_pager import SweepPager
 
 
+class _TwoLineLabel(QLabel):
+    """A label of exactly two lines: one per line of the text it is given,
+    each elided to the width available rather than wrapped.
+
+    Word wrapping was the original problem. A wrapped QLabel in a form layout
+    keeps the height it was first laid out at, so a value that spilled onto a
+    third rendered line lost it -- and the line that went missing was the fit
+    quality, the one that says whether the subtraction can be trusted. Eliding
+    caps the render at one line per line of text no matter how long a fitted
+    value or an error message turns out to be, and the size hints reserve the
+    two lines from the live font metrics, so the reservation still holds after
+    the stylesheet has changed the font.
+    """
+
+    def __init__(self, text: str = "", parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._full_text = ""
+        self.setWordWrap(False)
+        self.setText(text)
+
+    @property
+    def full_text(self) -> str:
+        """The text as given, before eliding -- what the label means, as
+        opposed to what currently fits."""
+        return self._full_text
+
+    def setText(self, text: str) -> None:
+        self._full_text = text
+        self._apply_elision()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_elision()
+
+    def _apply_elision(self) -> None:
+        metrics = self.fontMetrics()
+        # A hard floor, not just a size hint: a hint is a preference a cramped
+        # form layout is free to compress below, and it did -- the row came out
+        # at 25 px where two lines need 30. Re-asserted here rather than set
+        # once in __init__ so it follows the font the stylesheet installs
+        # later. Guarded because setMinimumHeight can trigger a resize, and a
+        # resize comes back through this method.
+        two_lines = metrics.lineSpacing() * 2
+        if self.minimumHeight() != two_lines:
+            self.setMinimumHeight(two_lines)
+
+        # A couple of pixels back for the frame, so the last glyph is not
+        # shaved by a rounding error.
+        available = max(self.width() - 2, 10)
+        super().setText(
+            "\n".join(
+                metrics.elidedText(line, Qt.ElideRight, available)
+                for line in self._full_text.split("\n")
+            )
+        )
+
+    def _two_lines(self, height: int) -> int:
+        return max(height, self.fontMetrics().lineSpacing() * 2)
+
+    def minimumSizeHint(self):
+        hint = super().minimumSizeHint()
+        hint.setHeight(self._two_lines(hint.height()))
+        return hint
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        hint.setHeight(self._two_lines(hint.height()))
+        return hint
+
+
 def _titleize(rbf_type: str) -> str:
     """'c2-matern' -> 'C2 Matern', 'piecewise-linear' -> 'Piecewise Linear'."""
     return " ".join(word.capitalize() for word in rbf_type.split("-"))
@@ -51,6 +121,7 @@ class DRTStep(StepPage):
         # Plain tuples of option strings; core.drt keeps its pyimpspec imports
         # inside its functions so reading these here stays free.
         from core.drt import RBF_TYPES
+        from core.ecm import DIFFUSION_PRESETS
 
         # ---------------------------------------------------------- settings
 
@@ -140,6 +211,62 @@ class DRTStep(StepPage):
             "points as removed, so you can see what the DRT ran on."
         )
         form.addRow(self.remove_inductive_check)
+
+        self.subtract_diffusion_check = QCheckBox("Subtract diffusion tail (fitted)")
+        self.subtract_diffusion_check.setToolTip(
+            "Fit the model below to each sweep and subtract the fitted "
+            "diffusion element's own impedance, so the low-frequency tail "
+            "stops dominating the longest time constants of the DRT.\n\n"
+            "Unlike the filter above, this keeps every point: the tail is "
+            "flattened rather than dropped. It is also a subtraction of a "
+            "*model*, so the fit quality shown below is part of the result — "
+            "a poor fit subtracts a tail that was never measured.\n\n"
+            "Pairs with the filter above on a cell with cabling inductance. "
+            "None of these models has an inductor, so the inductive points are "
+            "always held out of the fit; but they are not removed by this "
+            "setting, and on a cell whose inductive tail is larger than its "
+            "arc they will still dominate the plot until the filter above is "
+            "on too.\n\n"
+            "Scoped to the DRT alone, like the filter above: the sweep's own "
+            "data is untouched, so Validation and ECM are unaffected."
+        )
+        form.addRow(self.subtract_diffusion_check)
+
+        self.diffusion_cdc_combo = compact_combo(QComboBox())
+        add_combo_items(self.diffusion_cdc_combo, [(n, c) for n, c in DIFFUSION_PRESETS])
+        self.diffusion_cdc_combo.setToolTip(
+            "The circuit fitted before subtracting. Each one ends in a "
+            "diffusion element in series with an ohmic resistance and one "
+            "R-CPE arc, and it is the series element alone that is removed.\n\n"
+            "Series is the point: only an element in series with the rest "
+            "contributes its own impedance to the total, so only then does "
+            "subtracting it leave the rest of the spectrum behind."
+        )
+        form.addRow("Diffusion model", self.diffusion_cdc_combo)
+
+        # Two lines by construction: the element on the first, the fit quality
+        # on the second. See _TwoLineLabel for why the room is reserved.
+        self.diffusion_status_label = _TwoLineLabel("—")
+        self.diffusion_status_label.setProperty("state", "muted")
+        # Top-aligned so the first line does not drift down the reserved space
+        # on the messages that only need one.
+        self.diffusion_status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.diffusion_status_label.setToolTip(
+            "The fitted diffusion parameters actually subtracted from the "
+            "sweep on screen, and the fit's pseudo chi-squared. Shown because "
+            "a subtraction rewrites measured points: this is what says whether "
+            "the flattened tail is a cleaned spectrum or an invented one."
+        )
+        # Kept so MainWindow can append a failed fit's full message without
+        # losing the explanation -- the label itself only has room for a
+        # truncated one.
+        self.diffusion_status_tooltip = self.diffusion_status_label.toolTip()
+        # Spans both columns, so it carries its own "Subtracted:" prefix. In
+        # the value column it had 206 px to work with, and "pseudo chi-squared
+        # 0.0114" alone measures 208 -- it wrapped onto a line of its own and
+        # was then clipped, which is the whole complaint. Across both columns
+        # there is nearly twice that, and each line fits as written.
+        form.addRow(self.diffusion_status_label)
 
         self.inductance_check = QCheckBox("Include series inductance (L)")
         self.inductance_check.setToolTip(
@@ -398,6 +525,7 @@ class DRTStep(StepPage):
             control.toggled.connect(self._sync_relevance)
         self.rbf_combo.currentIndexChanged.connect(self._sync_relevance)
         self.cv_combo.currentIndexChanged.connect(self._sync_relevance)
+        self.subtract_diffusion_check.toggled.connect(self._sync_relevance)
         self._sync_relevance()
 
     @property
@@ -430,6 +558,12 @@ class DRTStep(StepPage):
         shaped = self.rbf_combo.currentData() != "piecewise-linear"
         self._shape_header.setEnabled(shaped)
         set_row_enabled(form, self._shape_row, shaped)
+
+        # Not a pyimpspec rule but the same principle: neither the model nor
+        # the readout of what it subtracted means anything with the filter off.
+        subtracting = self.subtract_diffusion_check.isChecked()
+        set_row_enabled(form, self.diffusion_cdc_combo, subtracting)
+        set_row_enabled(form, self.diffusion_status_label, subtracting)
 
         # The header follows its rows: TR-RBF leaves both of them inert.
         samples = self.method == "bayesian"

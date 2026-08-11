@@ -24,6 +24,32 @@ CIRCUIT_PRESETS = (
     ("Finite-length Warburg", "R(Q[RWs])"),
 )
 
+# Elements whose impedance is a mass-transport (diffusion) response, as opposed
+# to a kinetic or geometric one. Read by core.filtering to find the term to
+# subtract; the symbols are pyimpspec's own, per get_elements().
+DIFFUSION_SYMBOLS = frozenset(
+    {
+        "W", "Ws", "Wo",           # Warburg: semi-infinite, transmissive, reflective
+        "G", "Ga",                 # Gerischer
+        "Ls",                      # de Levie
+        "Tlm", "Tlmbo", "Tlmbq", "Tlmbs", "Tlmno", "Tlmnq", "Tlmns",
+    }
+)
+
+# (menu label, CDC) for the DRT step's tail subtraction. Every one ends in a
+# diffusion element in *series* with the rest, which is what makes subtracting
+# it exact -- see core.filtering._series_diffusion_elements. That rules out
+# CIRCUIT_PRESETS' "R(Q[RWs])", where the Ws sits inside a parallel branch, so
+# these are a separate list rather than a filtered view of that one.
+DIFFUSION_PRESETS = (
+    ("Warburg (semi-infinite)", "R(RQ)W"),
+    ("Warburg, transmissive", "R(RQ)Ws"),
+    ("Warburg, reflective", "R(RQ)Wo"),
+    ("Gerischer", "R(RQ)G"),
+)
+
+DEFAULT_DIFFUSION_CDC = DIFFUSION_PRESETS[0][1]
+
 # "auto" is offered but deliberately not the default -- see run_ecm_fit.
 FIT_METHODS = ("least_squares", "auto", "leastsq", "powell", "nelder", "cg")
 WEIGHT_FORMS = ("boukamp", "auto", "modulus", "proportional", "unity")
@@ -109,15 +135,49 @@ def run_ecm_fit_seeded(
     return run_ecm_fit(dataset, seed_cdc(cdc, previous), **kwargs)
 
 
-def series_resistance(dataset) -> float:
-    """Estimate the series (ohmic) resistance as Re(Z) at the highest measured
-    frequency -- the high-frequency intercept."""
+def ohmic_resistance(frequencies, impedances) -> float:
+    """Re(Z) where the spectrum crosses the real axis, scanning down from the
+    highest frequency.
+
+    Deliberately not Re(Z) at the highest frequency, which is the textbook
+    high-frequency intercept and what this function used to return. That
+    reading assumes the sweep starts on the real axis, and a cell with cabling
+    inductance does not: it spends its first decades well above the axis, so
+    the first point is measuring the inductor, not the electrolyte. On the
+    demo cells that puts the estimate out by 1.7-4.8x -- 0.029 ohm against a
+    true 0.0073 -- and any polarisation resistance derived by subtracting it
+    comes out negative.
+
+    Falls back to the first point when the sweep never crosses, which is the
+    case the high-frequency reading was right about all along.
+    """
     import numpy as np
 
+    order = np.argsort(frequencies)[::-1]  # high -> low
+    real = np.asarray(impedances).real[order]
+    imag = np.asarray(impedances).imag[order]
+
+    crossings = np.flatnonzero(np.sign(imag[:-1]) * np.sign(imag[1:]) < 0)
+    if len(crossings) == 0:
+        return float(real[0])
+
+    # Interpolated between the two points straddling the axis: at these
+    # magnitudes the gap between adjacent points is a large fraction of the
+    # polarisation resistance being estimated.
+    i = crossings[0]
+    span = imag[i] - imag[i + 1]
+    if span == 0:
+        return float(real[i])
+    return float(real[i] + (imag[i] / span) * (real[i + 1] - real[i]))
+
+
+def series_resistance(dataset) -> float:
+    """Estimate a sweep's series (ohmic) resistance. See ohmic_resistance for
+    why this is the axis crossing rather than the first point."""
     frequencies = dataset.frequencies
     if len(frequencies) == 0:
         raise ValueError("Dataset has no unmasked points.")
-    return float(dataset.impedances[np.argmax(frequencies)].real)
+    return ohmic_resistance(frequencies, dataset.impedances)
 
 
 def circuit_from_drt_peaks(

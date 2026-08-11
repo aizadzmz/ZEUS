@@ -1,4 +1,4 @@
-"""Confirmation dialog for the generic txt/csv importer."""
+"""Column-assignment dialog for the generic txt/csv importer."""
 from typing import Dict, Optional, Sequence
 
 from PySide6.QtWidgets import (
@@ -19,8 +19,8 @@ from PySide6.QtWidgets import (
 
 
 class GenericImportDialog(QDialog):
-    """Lets the user confirm/correct the column-role guess for a generic
-    txt/csv EIS export before it's parsed."""
+    """Lets the user assign a role to each column of a generic txt/csv EIS
+    export, pre-filled with the parser's guess, before it's parsed."""
 
     def __init__(
         self,
@@ -31,14 +31,14 @@ class GenericImportDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Confirm column mapping")
+        self.setWindowTitle("Assign column headers")
         self.resize(640, 460)
         self._headers = list(headers)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
             f"'{filename}' doesn't match a known export format.\n"
-            "Please manually map the column."
+            "Assign a header to each column ZEUS needs."
         ))
         layout.addWidget(self._build_preview_table(sample_rows))
 

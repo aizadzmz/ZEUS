@@ -33,7 +33,35 @@ def _is_picklable(obj) -> bool:
     return True
 
 
-class ValidationWorker(QThread):
+class _BatchWorker(QThread):
+    """A QThread that walks a batch of datasets and can be asked to stop.
+
+    Cancellation is checked between datasets, not inside one: the work is a
+    single pyimpspec call per sweep with no callback to interrupt it, so the
+    honest guarantee is "no sweep after this one", not "stop now". That is
+    enough for the case it exists to serve -- quitting the app without
+    destroying a live thread, which aborts the process (0xC0000409).
+    """
+
+    def __init__(self, runner: Callable, datasets: List, parent=None):
+        super().__init__(parent)
+        self._runner = runner
+        self._datasets = datasets
+        # Plain bool rather than a lock: it is written once from the UI thread
+        # and read between sweeps on this one, and a missed read costs one
+        # extra sweep, not correctness.
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """Ask the batch to stop after the sweep in flight."""
+        self._cancelled = True
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+
+class ValidationWorker(_BatchWorker):
     """Runs a validation method (KK or Z-HIT) over several datasets.
 
     The runner decides what a "result" is: a plain ValidationResult for a
@@ -45,10 +73,8 @@ class ValidationWorker(QThread):
     progress = Signal(int, int)              # completed count, total
 
     def __init__(self, method_name: str, runner: Callable, datasets: List, parent=None):
-        super().__init__(parent)
+        super().__init__(runner, datasets, parent)
         self._method_name = method_name
-        self._runner = runner
-        self._datasets = datasets
         self._completed = 0
         self._total = 0
 
@@ -60,7 +86,7 @@ class ValidationWorker(QThread):
 
         first, rest = self._datasets[0], self._datasets[1:]
         elapsed = self._run_one(first)
-        if not rest:
+        if not rest or self._cancelled:
             return
 
         if not self._worth_pooling(elapsed, rest):
@@ -87,6 +113,12 @@ class ValidationWorker(QThread):
             with ProcessPoolExecutor(max_workers=workers) as pool:
                 futures = {pool.submit(self._runner, ds): ds for ds in datasets}
                 for future in as_completed(futures):
+                    if self._cancelled:
+                        # Drops what has not started and stops waiting on what
+                        # has; the subprocesses still running are torn down by
+                        # the pool's own exit.
+                        pool.shutdown(wait=False, cancel_futures=True)
+                        break
                     ds = futures[future]
                     try:
                         result = future.result()
@@ -97,10 +129,14 @@ class ValidationWorker(QThread):
                     outstanding.pop(ds.key, None)
         except Exception:
             pass
-        return list(outstanding.values())
+        # Nothing is outstanding once cancelled -- it was abandoned, not missed,
+        # and run() must not hand it to the serial fallback to be redone.
+        return [] if self._cancelled else list(outstanding.values())
 
     def _run_serial(self, datasets: List) -> None:
         for ds in datasets:
+            if self._cancelled:
+                return
             self._run_one(ds)
 
     def _run_one(self, ds) -> float:
@@ -128,20 +164,17 @@ class ValidationWorker(QThread):
         self.progress.emit(self._completed, self._total)
 
 
-class DRTWorker(QThread):
+class DRTWorker(_BatchWorker):
     """Runs a potentially very slow DRT calculation over several datasets off
     the UI thread, emitting one result_ready per dataset."""
 
     result_ready = Signal(str, object)  # dataset key, result
     error = Signal(str, str)            # dataset key, message
 
-    def __init__(self, runner: Callable, datasets: List, parent=None):
-        super().__init__(parent)
-        self._runner = runner
-        self._datasets = datasets
-
     def run(self) -> None:
         for ds in self._datasets:
+            if self._cancelled:
+                return
             try:
                 result = self._runner(ds)
             except Exception as exc:
@@ -150,21 +183,18 @@ class DRTWorker(QThread):
                 self.result_ready.emit(ds.key, result)
 
 
-class ECMWorker(QThread):
+class ECMWorker(_BatchWorker):
     """Fits an equivalent circuit to several datasets off the UI thread."""
 
     result_ready = Signal(str, object)  # dataset key, FitResult
     error = Signal(str, str)            # dataset key, message
     progress = Signal(int, int)         # completed count, total
 
-    def __init__(self, runner: Callable, datasets: List, parent=None):
-        super().__init__(parent)
-        self._runner = runner
-        self._datasets = datasets
-
     def run(self) -> None:
         total = len(self._datasets)
         for completed, ds in enumerate(self._datasets, start=1):
+            if self._cancelled:
+                return
             try:
                 result = self._runner(ds)
             except Exception as exc:

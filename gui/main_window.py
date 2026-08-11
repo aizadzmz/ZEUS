@@ -9,9 +9,10 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, NamedTuple, Optional, Tuple
 
-from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtCore import QEventLoop, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
+    QApplication,
     QDialog,
     QFileDialog,
     QLabel,
@@ -51,6 +52,11 @@ from gui.theme import THEMES, apply_theme, diagram_colors
 from gui.workers import DRTWorker, ECMWorker, ValidationWorker
 
 VALIDATION_METHODS = ("Kramers-Kronig", "Z-HIT")
+
+# How many diffusion fits to keep. Sized to hold a large batch several times
+# over, since a redraw must not evict what the same redraw is about to read;
+# at ~20 KB an entry this is a few megabytes at worst.
+MAX_DIFFUSION_FITS = 512
 
 # Circuit edits kept for undo, as CDC snapshots.
 MAX_CIRCUIT_UNDO = 50
@@ -132,11 +138,26 @@ class MainWindow(QMainWindow):
         self._drt_params: Dict[str, dict] = {}
         # {ds.key: DRTPeaks}
         self._drt_peaks = {}
+        # {(ds.key, cdc, masked indices): (impedances, FitResult) or (None, msg)}
+        # -- the DRT step's diffusion subtraction, which costs a CNLS fit per
+        # sweep and is re-applied on every redraw. Keyed by the mask too, so an
+        # eraser edit or a prune refits rather than subtracting a stale tail.
+        self._diffusion_fits: Dict[tuple, tuple] = {}
+        # {ds.key: FitResult or the message a failed fit left}, rebuilt by
+        # _diffusion_applied for whichever sweeps it last ran over. Scoped to
+        # the screen: it answers "what does the readout describe", and only
+        # the sweeps currently drawn are in it.
+        self._diffusion_shown: Dict[str, object] = {}
         self._drt_worker: Optional[DRTWorker] = None
         self._drt_worker_errors: List[Tuple[str, str]] = []
         # Settings for the batch in flight: result_ready carries only
         # (label, result), so _on_drt_worker_result reads them from here.
         self._pending_drt_params: dict = {}
+        # The same, per sweep: {ds.key: FitResult or message} as the batch was
+        # fitted, frozen at _start_drt_run. Scoped to the run, which is why it
+        # is not _diffusion_shown -- that one follows the screen, and a batch
+        # outlives any one draw.
+        self._pending_diffusion: Dict[str, object] = {}
         # What the batch in flight is called and how many sweeps it covers,
         # kept for the summary _on_drt_worker_finished shows once it ends.
         self._drt_run_name = "DRT"
@@ -338,7 +359,9 @@ class MainWindow(QMainWindow):
         viz.add_files_button.clicked.connect(self._add_files_dialog)
         viz.remove_file_button.clicked.connect(self._on_remove_file_clicked)
         for step in self._steps():
-            step.single_radio.toggled.connect(self._on_display_mode_changed)
+            # The ECM step has no toggle to wire -- it is fixed on Single.
+            if step.single_radio is not None:
+                step.single_radio.toggled.connect(self._on_display_mode_changed)
             step.settings_width_changed.connect(self._on_settings_width_changed)
         viz.markers_radio.toggled.connect(self._refresh)
         viz.marker_style_button.clicked.connect(self._on_marker_style_clicked)
@@ -368,6 +391,10 @@ class MainWindow(QMainWindow):
         # Redraws the measured plot with the dropped points greyed out; the
         # masks themselves, and so every other step, are untouched.
         drt.remove_inductive_check.toggled.connect(self._refresh)
+        # Both redraw the measured plot with the tail flattened; like the
+        # filter above, neither touches the masks or any other step.
+        drt.subtract_diffusion_check.toggled.connect(self._refresh)
+        drt.diffusion_cdc_combo.currentIndexChanged.connect(self._on_diffusion_model_changed)
         drt.run_drt_button.clicked.connect(self._run_drt)
         drt.run_peak_analysis_button.clicked.connect(self._run_peak_analysis)
         drt.export_results_button.clicked.connect(self._export_drt_results)
@@ -691,6 +718,68 @@ class MainWindow(QMainWindow):
     def _steps(self) -> List:
         return [self.data_viz_step, self.validation_step, self.drt_step, self.ecm_step]
 
+    # -------------------------------------------------------------- closing
+
+    def _running_workers(self) -> List:
+        """Every worker thread still going, in the order they are named to the
+        user."""
+        candidates = (
+            ("validation", self._worker),
+            ("DRT", self._drt_worker),
+            ("circuit fit", self._ecm_worker),
+        )
+        return [(name, w) for name, w in candidates if w is not None and w.isRunning()]
+
+    def closeEvent(self, event) -> None:
+        """Never let the window take a live worker thread down with it.
+
+        Qt aborts the process outright when a running QThread is destroyed --
+        0xC0000409, no traceback, no message -- and every worker here is
+        parented to this window. A Bayesian DRT batch runs for tens of minutes
+        with the plots deliberately left live to be watched, so closing mid-run
+        is an ordinary thing to do, not an edge case.
+
+        Cancellation lands between sweeps rather than inside one (see
+        gui.workers._BatchWorker), so the wait below is bounded by the sweep in
+        flight and not by the rest of the batch.
+        """
+        running = self._running_workers()
+        if not running:
+            event.accept()
+            return
+
+        names = ", ".join(name for name, _ in running)
+        confirm = QMessageBox.question(
+            self,
+            "Quit ZEUS",
+            f"A {names} run is still going.\n\n"
+            "Quitting stops it after the sweep it is on, which may take a "
+            "moment to finish. Results already computed are kept, but "
+            "unsaved ones are lost — use File ▸ Save session to keep them.\n\n"
+            "Quit anyway?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            event.ignore()
+            return
+
+        self.statusBar().showMessage("Finishing the current sweep before quitting…")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for _, worker in running:
+                worker.cancel()
+            for _, worker in running:
+                # Sliced rather than one open-ended wait() so the window keeps
+                # repainting and does not go grey. User input is excluded: a
+                # click landing during the wait could start another run, and
+                # the close is already settled.
+                while not worker.wait(100):
+                    QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+        finally:
+            QApplication.restoreOverrideCursor()
+        event.accept()
+
     # ------------------------------------------------------------ handlers
 
     def _open_file(self) -> None:
@@ -719,6 +808,9 @@ class MainWindow(QMainWindow):
         self._drt_results = {}
         self._drt_params = {}
         self._drt_peaks = {}
+        self._diffusion_fits = {}
+        self._diffusion_shown = {}
+        self._pending_diffusion = {}
         self._ecm_results = {}
         self._ecm_params = {}
         self._ecm_shown_cdc = None
@@ -847,6 +939,10 @@ class MainWindow(QMainWindow):
         self._drt_results = {k: v for k, v in self._drt_results.items() if k not in removed_keys}
         self._drt_params = {k: v for k, v in self._drt_params.items() if k not in removed_keys}
         self._drt_peaks = {k: v for k, v in self._drt_peaks.items() if k not in removed_keys}
+        # Keyed by (ds.key, cdc, mask), so the sweep is the first third.
+        self._diffusion_fits = {
+            k: v for k, v in self._diffusion_fits.items() if k[0] not in removed_keys
+        }
         # Keyed by (cdc, ds.key), so the sweep is the second half.
         self._ecm_results = {
             k: v for k, v in self._ecm_results.items() if k[1] not in removed_keys
@@ -924,6 +1020,9 @@ class MainWindow(QMainWindow):
             self.validation_step.hard_limit_spin.value(),
             self.validation_step.max_removed_spin.value(),
             self.validation_step.residual_mode,
+            self.drt_step.remove_inductive_check.isChecked(),
+            self.drt_step.subtract_diffusion_check.isChecked(),
+            self.drt_step.diffusion_cdc_combo.currentData(),
         )
         try:
             save_session(
@@ -1300,6 +1399,34 @@ class MainWindow(QMainWindow):
         # rejected under.
         self.validation_step.set_residual_mode(ui_state.get("residual_mode"))
 
+        # The DRT step's own filters, which rewrite what that step plots. Left
+        # off, the restored spectrum would be drawn unfiltered under a DRT
+        # curve computed from a filtered sweep, with nothing saying so -- and
+        # a subtraction cannot be spotted after the fact, the saved data no
+        # longer holding the tail it lost.
+        self.drt_step.remove_inductive_check.blockSignals(True)
+        self.drt_step.remove_inductive_check.setChecked(
+            bool(ui_state.get("drt_inductive_filter", False))
+        )
+        self.drt_step.remove_inductive_check.blockSignals(False)
+
+        self.drt_step.subtract_diffusion_check.blockSignals(True)
+        self.drt_step.subtract_diffusion_check.setChecked(
+            bool(ui_state.get("drt_subtract_diffusion", False))
+        )
+        self.drt_step.subtract_diffusion_check.blockSignals(False)
+
+        cdc = ui_state.get("drt_diffusion_cdc")
+        if cdc is not None:
+            index = self.drt_step.diffusion_cdc_combo.findData(cdc)
+            if index >= 0:
+                self.drt_step.diffusion_cdc_combo.blockSignals(True)
+                self.drt_step.diffusion_cdc_combo.setCurrentIndex(index)
+                self.drt_step.diffusion_cdc_combo.blockSignals(False)
+        # The rows these two govern are enabled by the checkbox, and the
+        # signals that would have done it were blocked above.
+        self.drt_step._sync_relevance()
+
         self.statusBar().showMessage(
             f"Restored session from '{Path(path).name}' "
             f"({len(datasets)} sweep(s))."
@@ -1532,28 +1659,160 @@ class MainWindow(QMainWindow):
 
     def _drt_inputs(self, datasets: List, detached: bool = False) -> List:
         """The sweeps the DRT sees, which are not necessarily the sweeps
-        themselves: the DRT step's own inductive-tail filter is applied to
-        copies. The shared mask stays put, so a validation run done without
-        that filter is not marked stale by turning it on here.
+        themselves: the DRT step's own two filters -- the inductive-tail mask
+        and the diffusion-tail subtraction -- are applied to copies. The shared
+        mask stays put, so a validation run done without them is not marked
+        stale by turning one on here, and the ECM step keeps reading the sweep
+        as measured.
 
         `detached` guarantees copies whether or not that filter is on, for the
         worker thread: it reads its datasets for as long as the run lasts, and
         the eraser stays live on the plot throughout, so the originals can be
-        remasked under it. Callers that only draw pass the live sweeps."""
+        remasked under it. Callers that only draw pass the live sweeps.
+
+        The two filters compose in the order the spectrum is read: the
+        inductive points are dropped first, so the diffusion fit underneath is
+        not asked to explain them."""
         from core.filtering import detached_copy, inductive_tail_removed
 
         if self.drt_step.remove_inductive_check.isChecked():
-            return [inductive_tail_removed(ds) for ds in datasets]
+            datasets = [inductive_tail_removed(ds) for ds in datasets]
+            detached = False  # already copies
+        # Always returns copies, which is why it settles `detached` too.
+        if self.drt_step.subtract_diffusion_check.isChecked():
+            return self._diffusion_applied(datasets)
+        # Nothing was subtracted, so nothing is on record. Cleared rather than
+        # left alone: fits from when the filter was on would otherwise still be
+        # sitting here, and _on_drt_worker_result would read them as this
+        # batch's -- putting a diffusion element into a circuit built from a
+        # sweep that still has its tail, which double-counts it.
+        self._diffusion_shown = {}
         return [detached_copy(ds) for ds in datasets] if detached else datasets
+
+    def _diffusion_applied(self, datasets: List) -> List:
+        """The sweeps with a fitted diffusion tail subtracted, always as copies.
+
+        Fits are cached because this runs on every redraw, not just on Run: a
+        pager step or a checkbox toggle would otherwise refit every sweep on
+        screen. A sweep whose fit fails passes through unsubtracted rather than
+        dropping out -- the readout says which, and a missing tail is easier to
+        read on the plot than a missing sweep."""
+        from core.filtering import detached_copy, diffusion_impedance, impedance_subtracted
+
+        cdc = self.drt_step.diffusion_cdc_combo.currentData()
+        # What the readout describes. Recorded here rather than looked up
+        # again later because the sweep reaching this point may already be the
+        # inductive filter's copy, whose mask -- and so whose cache key -- is
+        # not the one the caller's original sweep would rebuild.
+        self._diffusion_shown = {}
+        applied = []
+        for ds in datasets:
+            masked = frozenset(i for i, is_masked in ds.data.get_mask().items() if is_masked)
+            cache_key = (ds.key, cdc, masked)
+            entry = self._diffusion_fits.get(cache_key)
+            if entry is None:
+                try:
+                    entry = diffusion_impedance(ds, cdc)
+                except Exception as exc:
+                    entry = (None, str(exc))
+                self._diffusion_fits[cache_key] = entry
+                self._evict_diffusion_fits()
+
+            impedances, fit = entry
+            self._diffusion_shown[ds.key] = fit
+            applied.append(
+                detached_copy(ds)
+                if impedances is None
+                else impedance_subtracted(ds, impedances)
+            )
+        return applied
+
+    def _evict_diffusion_fits(self) -> None:
+        """Keep the fit cache bounded, oldest first.
+
+        The mask is part of the key, so every eraser click on a subtracted
+        sweep mints a new entry and the old one can never be hit again -- an
+        afternoon's editing would otherwise accumulate a fit result and an
+        impedance array per click. The cap is set well above a batch so that a
+        single redraw over the whole selection still lands entirely in cache;
+        evicting into a redraw would refit every sweep on every repaint.
+        """
+        while len(self._diffusion_fits) > MAX_DIFFUSION_FITS:
+            self._diffusion_fits.pop(next(iter(self._diffusion_fits)))
+
+    def _update_diffusion_label(self, displayed: List) -> None:
+        """Say what was subtracted from the sweep on screen. Like the λ
+        readout, only meaningful for a single sweep -- with several on screen
+        each has its own fit."""
+        from core.filtering import describe_diffusion_fit
+
+        label = self.drt_step.diffusion_status_label
+        # The row holds two lines; anything longer belongs in the tooltip,
+        # which is restored on every branch so a failure's message does not
+        # outlive the failure.
+        label.setToolTip(self.drt_step.diffusion_status_tooltip)
+
+        # The row spans both form columns and so has no label of its own; each
+        # message names itself.
+        if not self.drt_step.subtract_diffusion_check.isChecked():
+            label.setText("Subtracted: —")
+            style.set_state(label, "muted")
+            return
+
+        if len(displayed) != 1:
+            label.setText(
+                f"Subtracted from {len(displayed)} sweeps\neach fitted separately"
+            )
+            style.set_state(label, "muted")
+            return
+
+        fit = self._diffusion_shown.get(displayed[0].key)
+        if fit is None:
+            label.setText("Subtracted: —")
+            style.set_state(label, "muted")
+        elif isinstance(fit, str):
+            # The cache stores a failed fit's message in the result's place. A
+            # fitter's message can run to a paragraph, so the label gets a
+            # single line's worth and the tooltip gets all of it.
+            # The label elides what will not fit; the tooltip keeps all of it,
+            # because a fitter's message can run to a paragraph.
+            label.setText(f"Not subtracted\n{fit}")
+            label.setToolTip(
+                f"{self.drt_step.diffusion_status_tooltip}\n\nThis sweep: {fit}"
+            )
+            style.set_state(label, "error")
+        else:
+            # No "Subtracted:" prefix on this one: the element's own name opens
+            # the line, and the width it would cost is the width the fitted
+            # values need. The row sits directly under the checkbox that names
+            # the operation, and the tooltip says the rest.
+            label.setText(describe_diffusion_fit(fit))
+            style.set_state(label, "ok")
 
     def _drt_record(self, params: dict) -> dict:
         """What gets saved/exported for a run. The filter changes the input
         data rather than the algorithm, so run_drt never sees it as a kwarg,
         but a reader of the session needs to know it was on."""
+        subtracting = self.drt_step.subtract_diffusion_check.isChecked()
         return dict(
             params,
             remove_inductive_tail=self.drt_step.remove_inductive_check.isChecked(),
+            # The circuit as well as the flag: a subtraction cannot be
+            # reconstructed from the saved data, which no longer holds the tail
+            # it removed, so a reader who only knows it happened knows nothing.
+            subtract_diffusion=subtracting,
+            diffusion_cdc=(
+                self.drt_step.diffusion_cdc_combo.currentData() if subtracting else None
+            ),
         )
+
+    def _on_diffusion_model_changed(self) -> None:
+        """Only redraws when the model is actually in use -- the combo is
+        greyed out with the filter off, but a session restore can still move
+        it, and refitting every sweep for a control nothing reads would be a
+        long stall for no visible change."""
+        if self.drt_step.subtract_diffusion_check.isChecked():
+            self._refresh()
 
     def _update_optimal_lambda_label(self, selected: List) -> None:
         lambda_value = None
@@ -1645,9 +1904,15 @@ class MainWindow(QMainWindow):
         self._drt_run_total = len(selected)
         self._pending_drt_params = self._drt_record(params)
         self._drt_worker_errors = []
-        self._drt_worker = DRTWorker(
-            runner, self._drt_inputs(selected, detached=True), parent=self
-        )
+        inputs = self._drt_inputs(selected, detached=True)
+        # A copy, not a reference. _diffusion_shown is rebuilt by every redraw
+        # and covers only the sweeps then on screen, while the pager stays live
+        # through a run -- _set_controls_enabled locks the settings column and
+        # nothing else, so a batch can be watched. One click on › would
+        # otherwise shrink it to that one sweep, and every result still to come
+        # would record no diffusion element at all.
+        self._pending_diffusion = dict(self._diffusion_shown)
+        self._drt_worker = DRTWorker(runner, inputs, parent=self)
         self._drt_worker.result_ready.connect(self._on_drt_worker_result)
         self._drt_worker.error.connect(self._on_drt_worker_error)
         self._drt_worker.finished.connect(self._on_drt_worker_finished)
@@ -1658,8 +1923,22 @@ class MainWindow(QMainWindow):
         self._drt_worker.start()
 
     def _on_drt_worker_result(self, key: str, result) -> None:
+        from core.filtering import diffusion_element_cdc
+
         self._drt_results[key] = result
-        self._drt_params[key] = self._pending_drt_params
+        # The diffusion fit is recorded per sweep, unlike the rest of the
+        # record, because each sweep has its own -- and it is what "Build
+        # circuit from DRT" has to put back into the model. Read from the
+        # snapshot _start_drt_run took, not from _diffusion_shown: that one
+        # tracks the screen and will have moved on by the time a long batch
+        # reports back.
+        fit = self._pending_diffusion.get(key)
+        self._drt_params[key] = dict(
+            self._pending_drt_params,
+            diffusion_element=(
+                diffusion_element_cdc(fit) if fit is not None and not isinstance(fit, str) else None
+            ),
+        )
 
     def _on_drt_worker_error(self, key: str, message: str) -> None:
         self._drt_worker_errors.append((key, message))
@@ -1728,7 +2007,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Build circuit from DRT",
                 "No DRT peak analysis for the selected sweep(s).\n\n"
-                "Run a DRT calculation (7) and then 'Run deconvolution' (8) "
+                "Run a DRT calculation (7) and then 'Run peak extraction' (8) "
                 "first — the peaks are what decide how many RC elements the "
                 "circuit needs.",
             )
@@ -1742,12 +2021,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Build circuit from DRT", str(exc))
             return
 
+        # A DRT computed on a subtracted sweep describes a cell without its
+        # tail, so its peaks give a circuit without one -- and ECM fits the
+        # sweep as measured, tail included. Fitting that mismatch does not
+        # merely fit poorly: the R-CPE pairs absorb the tail and their
+        # resistances come out by tens of percent, with a pseudo chi-squared
+        # that looks perfectly acceptable. Putting the fitted element back is
+        # what closes the gap; see core.filtering.diffusion_element_cdc.
+        subtracted = (self._drt_params.get(source.key) or {}).get("diffusion_element")
+        if subtracted:
+            cdc += subtracted
+
         self._push_ecm_undo()
         self.ecm_step.cdc_edit.setText(cdc)
         num_pairs = cdc.count("(")
+        tail = " + fitted diffusion element" if subtracted else ""
         self.statusBar().showMessage(
             f"Circuit built from {self._display_label(source)}: "
-            f"{num_pairs} R-CPE pair(s) + series R."
+            f"{num_pairs} R-CPE pair(s) + series R{tail}."
         )
 
     def _on_ecm_cdc_changed(self, text: str) -> None:
@@ -2458,6 +2749,9 @@ class MainWindow(QMainWindow):
             self._draw_spectrum(
                 self.drt_step.top_pane, self._drt_inputs(drawn), show_removed=True
             )
+            # After the draw, not before: _drt_inputs is what fills in the fits
+            # the readout describes.
+            self._update_diffusion_label(drawn)
 
             if p["drt_selected"]:
                 self.drt_step.drt_pane.set_widget(build_drt_plot(p["drt_selected"]))

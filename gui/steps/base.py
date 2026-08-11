@@ -39,8 +39,19 @@ class StepPage(QWidget):
     # other steps and persists it, so the panel edge does not jump between them.
     settings_width_changed = Signal(int)
 
+    # The mode a step is fixed in when it never adds the Singular/Multiple
+    # toggle. Only ECMStep does that: its circuit diagram and parameter report
+    # describe one sweep, so offering to overlay the selection promised a
+    # comparison the rest of the step could not show.
+    fixed_display_mode = "Combined"
+
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
+
+        # Set here rather than only in display_mode_control, so a step that
+        # never calls it still answers display_mode without an AttributeError.
+        self.single_radio = None
+        self.combined_radio = None
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -168,7 +179,10 @@ class StepPage(QWidget):
 
     @property
     def display_mode(self) -> str:
-        """"Single" or "Combined" for this step alone."""
+        """"Single" or "Combined" for this step alone. A step without the
+        toggle reports its fixed_display_mode instead."""
+        if self.single_radio is None:
+            return self.fixed_display_mode
         return "Single" if self.single_radio.isChecked() else "Combined"
 
     # Settings column

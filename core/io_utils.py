@@ -90,8 +90,7 @@ _SUPPORTED_EXTENSIONS = (".mpt", ".txt")
 
 
 def parse_eis_file(file_path: str | Path, file_id: int = 0) -> List[EISDataset]:
-    """Parse a BioLogic .mpt or plaintext .txt file into a list of EISDataset
-    objects."""
+    """Parse a BioLogic .mpt file into a list of EISDataset objects."""
     path = Path(file_path)
 
     if not path.exists():

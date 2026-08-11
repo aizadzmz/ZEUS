@@ -324,7 +324,7 @@ def write_drt_model(path: Path, peaks, series_resistance: Optional[float] = None
     if not pairs:
         raise ValueError(
             "No DRT peak has a positive resistance, so there is no circuit to "
-            "write. Run the deconvolution again, or export the CSV instead."
+            "write. Run peak extraction again, or export the CSV instead."
         )
 
     lines: List[str] = []
@@ -365,11 +365,18 @@ def write_drt_model(path: Path, peaks, series_resistance: Optional[float] = None
 
 
 def estimate_series_resistance(dataset: EISDataset) -> Optional[float]:
-    """The real impedance at the highest unmasked frequency -- the usual
-    estimate of the ohmic resistance, which the DRT itself does not report.
-    None when the sweep has no points left."""
+    """The sweep's ohmic resistance, which the DRT itself does not report, for
+    seeding Rs in the exported model. None when the sweep has no points left.
+
+    Shares core.ecm's estimator rather than reading the highest-frequency
+    point: this value leaves the app inside a .mdl the user fits from in
+    ZView, so an ohmic resistance several times too large is not a starting
+    guess that gets corrected -- it is a wrong number in a delivered file.
+    """
+    from core.ecm import ohmic_resistance
+
     frequencies = dataset.data.get_frequencies(masked=False)
     impedances = dataset.data.get_impedances(masked=False)
     if len(frequencies) == 0:
         return None
-    return float(impedances[int(np.argmax(frequencies))].real)
+    return ohmic_resistance(frequencies, impedances)

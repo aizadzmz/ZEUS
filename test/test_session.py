@@ -33,7 +33,15 @@ drt_peaks = {dataset.key: peaks_result}
 manual_masked = {dataset.key: {3, 7}}
 manual_kept = {dataset.key: {0}}
 ui_state = ui_state_to_dict(
-    manual_masked, manual_kept, "kk", True, 2.5, residual_mode="component"
+    manual_masked,
+    manual_kept,
+    "kk",
+    True,
+    2.5,
+    residual_mode="component",
+    drt_inductive_filter=True,
+    drt_subtract_diffusion=True,
+    drt_diffusion_cdc="R(RQ)Ws",
 )
 
 path = "test/data/_session_roundtrip_tmp.eisz"
@@ -117,6 +125,13 @@ assert loaded_ui_state["residual_threshold"] == 2.5
 # The convention decides which points a stored result rejects, so a reloaded
 # session has to come back on the one it was saved under.
 assert loaded_ui_state["residual_mode"] == "component"
+# The DRT step's own filters, which are not the validation step's. Without
+# these a reloaded session redraws the spectrum unfiltered beneath a DRT curve
+# computed from a filtered one, and a subtraction cannot be spotted after the
+# fact -- the saved points no longer hold the tail that was taken off them.
+assert loaded_ui_state["drt_inductive_filter"] is True
+assert loaded_ui_state["drt_subtract_diffusion"] is True
+assert loaded_ui_state["drt_diffusion_cdc"] == "R(RQ)Ws"
 print("ui_state round-trip OK, manual_masked =", loaded_ui_state["manual_masked"][dataset.key])
 
 # --- backward compatibility: a v1 (plain-JSON, no params/ui_state) session still loads ---
@@ -178,6 +193,11 @@ assert v1_validation_params == {("kk", v1_key): {}}
 assert v1_drt_params == {v1_key: {}}
 assert v1_ui_state["manual_masked"] == {}
 assert v1_ui_state["inductive_filter"] is False
+# The DRT filters arrived in schema v5. A session predating them was reloaded
+# with both off, so that is what they fall back to rather than a guess.
+assert v1_ui_state["drt_inductive_filter"] is False
+assert v1_ui_state["drt_subtract_diffusion"] is False
+assert v1_ui_state["drt_diffusion_cdc"] is None
 print("v1 backward-compatibility OK, resolved label -> key:", dataset.label, "->", v1_key)
 
 # --- multi-file: two files whose sweeps share a label ("Set 01") ---

@@ -1633,7 +1633,7 @@ def build_drt_plot(results: List[Tuple[str, object]], title: str = "DRT") -> pg.
 
 def build_drt_peaks_plot(
     results: List[Tuple[str, object]],
-    title: str = "Peak Deconvolution",
+    title: str = "Peak Extraction",
     num_per_decade: int = 100,
     show_individual_peaks: bool = True,
 ) -> pg.PlotWidget:

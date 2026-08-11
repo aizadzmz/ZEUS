@@ -198,7 +198,7 @@ save_session(
     loaded_ecm_params,
 ) = load_session(path)
 
-assert SCHEMA_VERSION == 4, SCHEMA_VERSION
+assert SCHEMA_VERSION == 5, SCHEMA_VERSION
 assert set(loaded_ecm) == set(ecm_results), f"{set(loaded_ecm)} != {set(ecm_results)}"
 assert loaded_ecm_params == ecm_params
 

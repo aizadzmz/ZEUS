@@ -21,7 +21,7 @@ from pyimpspec.analysis.fitting import FitResult, FittedParameter
 
 from core.io_utils import EISDataset
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _GZIP_MAGIC = b"\x1f\x8b"
 
 
@@ -305,11 +305,21 @@ def ui_state_to_dict(
     hard_limit: Optional[float] = None,
     max_removed: Optional[int] = None,
     residual_mode: Optional[str] = None,
+    drt_inductive_filter: bool = False,
+    drt_subtract_diffusion: bool = False,
+    drt_diffusion_cdc: Optional[str] = None,
 ) -> dict:
     # The advanced mode's fields are optional: a session saved before it
     # existed has none, and load falls back to the widgets' own defaults. So is
     # residual_mode, for the same reason -- and a session predating it was
     # rejected under the modulus convention, which is that default.
+    #
+    # The three drt_* fields are the DRT step's own filters, which are not the
+    # validation step's despite the similar names. They belong here rather than
+    # in drt_params alone: drt_params says what a stored *result* was computed
+    # under, while these are what the widgets must be put back to, and without
+    # them a reloaded session draws an unfiltered spectrum beneath a DRT curve
+    # computed from a filtered one.
     return {
         "manual_masked": {key: sorted(idxs) for key, idxs in manual_masked.items()},
         "manual_kept": {key: sorted(idxs) for key, idxs in manual_kept.items()},
@@ -321,6 +331,9 @@ def ui_state_to_dict(
         "hard_limit": hard_limit,
         "max_removed": max_removed,
         "residual_mode": residual_mode,
+        "drt_inductive_filter": drt_inductive_filter,
+        "drt_subtract_diffusion": drt_subtract_diffusion,
+        "drt_diffusion_cdc": drt_diffusion_cdc,
     }
 
 
@@ -346,6 +359,12 @@ def ui_state_from_dict(d: dict, key_by_label: Optional[Dict[str, str]] = None) -
         "hard_limit": d.get("hard_limit"),
         "max_removed": d.get("max_removed"),
         "residual_mode": d.get("residual_mode"),
+        # Absent in schema v1-v4, where the DRT filters were not saved at all.
+        # False/None is what those sessions were effectively reloaded as, so
+        # the fallback keeps their behaviour rather than guessing.
+        "drt_inductive_filter": d.get("drt_inductive_filter", False),
+        "drt_subtract_diffusion": d.get("drt_subtract_diffusion", False),
+        "drt_diffusion_cdc": d.get("drt_diffusion_cdc"),
     }
 
 
@@ -448,7 +467,7 @@ def load_session(
     session = json.loads(text)
 
     version = session.get("schema_version")
-    if version not in (1, 2, 3, SCHEMA_VERSION):
+    if version not in (1, 2, 3, 4, SCHEMA_VERSION):
         raise ValueError(
             f"Unsupported session schema version: {version!r} "
             f"(this build supports {SCHEMA_VERSION})"

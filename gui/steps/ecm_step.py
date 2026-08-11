@@ -43,19 +43,20 @@ def _label_for(value: str) -> str:
 
 
 class ECMStep(StepPage):
+    # No Singular/Multiple toggle: this step always pages one sweep at a time.
+    # The circuit diagram carries one sweep's fitted values and the report
+    # below it one sweep's parameters, so overlaying the whole selection
+    # offered a comparison only the top plot could actually make -- the
+    # diagram would still have been showing whichever sweep came first.
+    # "Fit circuit" is unaffected; it has always run on the whole selection.
+    fixed_display_mode = "Single"
+
     def __init__(self, selection: SweepSelection, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
         from core.ecm import CIRCUIT_PRESETS, FIT_METHODS, WEIGHT_FORMS
 
         # ---------------------------------------------------------- settings
-
-        self.add_display_mode_box(
-            "Display Option",
-            "Singular shows a single sweep's fit and its circuit, "
-            "stepped through with the ‹ › controls. Multiple overlays every "
-            "selected sweep's fit.",
-        )
 
         ecm_box, form = group_form(
             "ECM Settings",
@@ -91,7 +92,7 @@ class ECMStep(StepPage):
             "one parallel R-CPE pair per resolved peak, in series with the "
             "high-frequency resistance, with every value pre-filled from the "
             "peak's resistance and time constant. Fills the code below — it "
-            "does not fit. Run peak deconvolution on the DRT step first."
+            "does not fit. Run peak extraction on the DRT step first."
         )
         form.addRow(self.build_from_drt_button)
 
