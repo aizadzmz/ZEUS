@@ -298,8 +298,8 @@ wheels = [
 ]
 
 [[package]]
-name = "eis-batch-analysis"
-version = "0.3.0"
+name = "ZEUS"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "cvxopt" },

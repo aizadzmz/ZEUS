@@ -27,6 +27,22 @@ SPLASH_LOGO_PATH = ASSETS_DIR / "splash.png"
 # the real accent color without duplicating the literal.
 from gui.style import ACCENT  # noqa: E402
 
+# Splash card geometry. _splash_pixmap centres the logo against the progress
+# bar, and main() positions the bar, so both read the same numbers -- otherwise
+# a change to one silently knocks the logo off centre.
+SPLASH_SIZE = (420, 260)
+# installer/make_wizard_images.py mirrors this so the setup wizard and the app
+# it launches share a background. Change both together.
+SPLASH_BG = "#15181d"
+_SPLASH_MARGIN = 24
+# Caps the logo's width well inside the card, so a wide asset stays a mark on
+# a card rather than filling it edge to edge.
+SPLASH_LOGO_WIDTH = 260
+_PROGRESS_MARGIN = 20  # left/right inset, and the gap below the bar
+_PROGRESS_HEIGHT = 16
+# Top edge of the progress bar, measured up from the bottom of the card.
+_PROGRESS_TOP = _PROGRESS_MARGIN + _PROGRESS_HEIGHT
+
 # Shown one at a time on the splash screen while each module loads. Together
 # they cost several seconds, more on a cold boot. Blocking on them here, with
 # visible progress, puts the wait up front instead of on the first click of
@@ -131,18 +147,16 @@ def _install_hang_watchdog(log_file, seconds=12):
 
 
 def _splash_pixmap():
-    """Build the splash background: logo + app name on a dark card. Composed in
-    code rather than shipped pre-rendered, so the text and progress bar stay in
-    step with the logo asset and the accent color."""
+    """Build the splash background: the logo on a dark card. Composed in code
+    rather than shipped pre-rendered, so the card and progress bar stay in step
+    with the logo asset and the accent color."""
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+    from PySide6.QtGui import QColor, QPainter, QPixmap
 
-    width, height = 420, 260
-    # Everything below the logo: label band, then the progress bar's strip.
-    text_top, logo_top = 172, 24
+    width, height = SPLASH_SIZE
 
     pixmap = QPixmap(width, height)
-    pixmap.fill(QColor("#1e2228"))
+    pixmap.fill(QColor(SPLASH_BG))
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
@@ -151,25 +165,24 @@ def _splash_pixmap():
     if logo.isNull():  # missing asset should not cost us the splash
         logo = QPixmap(str(ICON_PATH))
     if not logo.isNull():
+        # Centred in the whole band above the progress bar. The wordmark is
+        # part of the logo asset and showMessage writes the per-step status
+        # below the bar, so this band holds nothing else.
+        band = height - _PROGRESS_TOP
         # Bounded on both axes so a logo of any aspect ratio stays inside the
-        # band between the top margin and the label.
+        # band rather than overrunning it.
         logo = logo.scaled(
-            260,
-            text_top - logo_top - 12,
+            SPLASH_LOGO_WIDTH,
+            band - 2 * _SPLASH_MARGIN,
             Qt.KeepAspectRatio,
             Qt.SmoothTransformation,
         )
         painter.drawPixmap(
             (width - logo.width()) // 2,
-            logo_top + (text_top - logo_top - 12 - logo.height()) // 2,
+            (band - logo.height()) // 2,
             logo,
         )
 
-    painter.setPen(QColor("#e3e6ea"))
-    painter.setFont(QFont("Segoe UI", 14, QFont.Bold))
-    painter.drawText(
-        pixmap.rect().adjusted(0, text_top, 0, 0), Qt.AlignHCenter, "ZEUS"
-    )
     painter.end()
 
     return pixmap
@@ -205,11 +218,16 @@ def main() -> None:
 
     splash = QSplashScreen(_splash_pixmap())
     progress = QProgressBar(splash)
-    progress.setGeometry(20, splash.height() - 36, splash.width() - 40, 16)
+    progress.setGeometry(
+        _PROGRESS_MARGIN,
+        splash.height() - _PROGRESS_TOP,
+        splash.width() - 2 * _PROGRESS_MARGIN,
+        _PROGRESS_HEIGHT,
+    )
     progress.setRange(0, len(_SPLASH_STEPS))
     progress.setTextVisible(False)
     progress.setStyleSheet(
-        f"QProgressBar {{ background: #12151a; border: none; border-radius: 4px; }}"
+        f"QProgressBar {{ background: #0b0d10; border: none; border-radius: 4px; }}"
         f"QProgressBar::chunk {{ background: {ACCENT}; border-radius: 4px; }}"
     )
     splash.show()

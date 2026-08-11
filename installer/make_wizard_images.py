@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "gui" / "assets"
 OUT = Path(__file__).resolve().parent
 
-# The splash card colour from gui/app.py, so the installer and the app that
-# follows it share a background.
-DARK = (30, 34, 40)
+# The splash card colour from gui/app.py (SPLASH_BG), so the installer and the
+# app that follows it share a background. Keep the two in step.
+DARK = (21, 24, 29)
 # The small image sits in the wizard's page header, which is white under
 # WizardStyle=modern.
 LIGHT = (255, 255, 255)
