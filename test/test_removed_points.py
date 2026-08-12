@@ -2,9 +2,7 @@
 "Removed" legend entry hides.
 
 Two reported faults. On the Bode plot the grey × markers only ever reached the
-|Z| series, so the -Φ series ran unbroken through gaps the magnitude series
-showed. And the legend entry stood for the first sweep's markers alone, so
-clicking it left every other sweep's on the plot.
+|Z| series, and the legend entry stood for the first sweep's markers alone.
 """
 import os
 

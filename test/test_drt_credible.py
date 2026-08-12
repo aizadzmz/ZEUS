@@ -1,10 +1,5 @@
 """The Bayesian DRT run's credible intervals reach the plot.
 
-They are the only thing that run produces beyond a plain TR-RBF one, and it
-costs minutes to hours to get them, but build_drt_plot read get_drt_data()
-alone -- so a Bayesian result drew identically to a simple one and the
-uncertainty was visible only in an exported CSV.
-
 The band is filled between two plotted curves, which makes the log x axis the
 thing to watch: a FillBetweenItem tracks its curves in plotted coordinates, so
 edges that never learned the axis is logarithmic would place the fill several

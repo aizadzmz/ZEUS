@@ -1,9 +1,8 @@
 """Export tests for core.zview_export.
 
 The formats are undocumented, so the structural assertions here are pinned
-against the files ZView ships (C:\\SAI). Those are only present where ZView is
-installed, hence the skips in the conformance section at the bottom -- the rest
-of the file runs everywhere.
+against the files ZView ships (C:\\SAI), hence the skips in the conformance
+section at the bottom -- the rest of the file runs everywhere.
 """
 import re
 from pathlib import Path

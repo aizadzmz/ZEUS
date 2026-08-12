@@ -22,11 +22,7 @@ from PySide6.QtWidgets import (
 from gui import style
 from gui.segmented import SegmentedControl
 
-# Sized to fit a two-column form: at 10pt the widest label is ~223px, so a row
-# needs ~425px including the form gap, a usable spinbox, margins, and a
-# scrollbar. Labels are kept short to stay under this -- pyDRTtools' full names
-# would push it past 550 and eat into the plots. Section headers carry the
-# context, and every full name lives in its control's tooltip.
+# Sized to fit a two-column form: at 10pt the widest label is ~223px, so a row needs ~425px. Labels stay short to hold this, with full names in each control's tooltip.
 DEFAULT_SETTINGS_WIDTH = 430
 MIN_SETTINGS_WIDTH = 380   # below this, the longer labels start wrapping
 MAX_SETTINGS_WIDTH = 620   # beyond this the panel starts eating the plots
@@ -35,21 +31,16 @@ MAX_SETTINGS_WIDTH = 620   # beyond this the panel starts eating the plots
 class StepPage(QWidget):
     """A resizable scrollable settings column beside a content area."""
 
-    # This step's splitter was dragged. MainWindow mirrors the width onto the
-    # other steps and persists it, so the panel edge does not jump between them.
+    # This step's splitter was dragged. MainWindow mirrors the width onto the other steps and persists it.
     settings_width_changed = Signal(int)
 
-    # The mode a step is fixed in when it never adds the Singular/Multiple
-    # toggle. Only ECMStep does that: its circuit diagram and parameter report
-    # describe one sweep, so offering to overlay the selection promised a
-    # comparison the rest of the step could not show.
+    # The mode a step is fixed in when it never adds the Singular/Multiple toggle -- only ECMStep, whose diagram and report describe one sweep.
     fixed_display_mode = "Combined"
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
-        # Set here rather than only in display_mode_control, so a step that
-        # never calls it still answers display_mode without an AttributeError.
+        # Set here rather than only in display_mode_control, so a step that never calls it still answers display_mode.
         self.single_radio = None
         self.combined_radio = None
 
@@ -57,8 +48,7 @@ class StepPage(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
 
         panel = QWidget()
-        # Named so the stylesheet can tint the settings column, separating it
-        # from the plot area without a hard border down the middle.
+        # Named so the stylesheet can tint the settings column without a hard border down the middle.
         panel.setObjectName("settingsPanelBody")
         self._settings = QVBoxLayout(panel)
         self._settings.setContentsMargins(*style.PANEL_MARGINS)
@@ -80,9 +70,7 @@ class StepPage(QWidget):
         self._content.setContentsMargins(0, 0, 0, 0)
         self._content.setSpacing(0)
 
-        # Underscored: ValidationStep, DRTStep and ECMStep each define their own
-        # vertical `self.splitter`, which would shadow this one and point the
-        # settings-width logic at a splitter measuring heights.
+        # Underscored: ValidationStep, DRTStep and ECMStep each define a vertical `self.splitter` that would shadow this one.
         self._page_splitter = QSplitter(Qt.Horizontal)
         self._page_splitter.addWidget(self.settings_scroll)
         self._page_splitter.addWidget(content)
@@ -96,8 +84,7 @@ class StepPage(QWidget):
         root.addWidget(self._page_splitter)
 
         self._wanted_width = DEFAULT_SETTINGS_WIDTH
-        # Content-side widgets that grey out with the settings column; see
-        # lock_with_settings.
+        # Content-side widgets that grey out with the settings column; see lock_with_settings.
         self._locked_extras: List[QWidget] = []
 
     # Interaction lock
@@ -138,9 +125,7 @@ class StepPage(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self._apply_wanted_width()
-        # Again once the event loop settles: a page is shown at its *previous*
-        # geometry and resized right after, so the call above can be sizing
-        # against a stale width and get clamped by the content minimum.
+        # Again once the event loop settles: a page is shown at its *previous* geometry and resized right after.
         QTimer.singleShot(0, self._apply_wanted_width)
 
     def resizeEvent(self, event) -> None:
@@ -157,8 +142,7 @@ class StepPage(QWidget):
         segmented = SegmentedControl(["Singular", "Multiple"])
         if tooltip:
             segmented.setToolTip(tooltip)
-        # Named *_radio though they are QToolButtons: same QAbstractButton API,
-        # and MainWindow._wire_steps reaches them by these names.
+        # Named *_radio though they are QToolButtons: same QAbstractButton API, and MainWindow._wire_steps reaches them by these names.
         self.single_radio = segmented.button(0)
         self.single_radio.setToolTip(
             "Display one sweep at a time controlled by ‹ ›."
@@ -187,12 +171,16 @@ class StepPage(QWidget):
 
     # Settings column
 
-    def add_settings(self, widget: QWidget) -> None:
-        self._settings.addWidget(widget)
+    def add_settings(self, widget: QWidget, stretch: int = 0) -> None:
+        """A non-zero `stretch` hands the column's spare height to this card
+        instead of to end_settings()' trailing gap -- for a card that scrolls
+        internally and so wants every pixel going spare."""
+        self._settings.addWidget(widget, stretch)
 
     def end_settings(self) -> None:
         """Push the settings to the top. Call once, after the last one --
-        without it they spread down the full panel height."""
+        without it they spread down the full panel height. Skip it on a column
+        that already gave a card the slack via add_settings(stretch=...)."""
         self._settings.addStretch()
 
     # Content column
@@ -213,11 +201,7 @@ def _section(title: str, tooltip: str) -> Tuple[QWidget, QVBoxLayout]:
     remaining pyDRTtools tell in this column."""
     card = QWidget()
     card.setObjectName("settingsSection")
-    # Never taller than its content. A card holding an Expanding child that is
-    # also height-capped (a list, a read-only text pane) otherwise claims the
-    # column's spare height, and since the capped child cannot use it the space
-    # lands on the title label, which grows and centres its text.
-    # end_settings()'s stretch is what the surplus is for.
+    # Never taller than its content: a card holding a height-capped Expanding child would otherwise claim the column's spare height and grow its title label.
     card.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
     outer = QVBoxLayout(card)
     outer.setContentsMargins(*style.GROUP_MARGINS)
@@ -258,8 +242,7 @@ def group_form(title: str, tooltip: str = "") -> Tuple[QWidget, QFormLayout]:
     form.setHorizontalSpacing(style.FORM_H_SPACING)
     form.setVerticalSpacing(style.FORM_V_SPACING)
     form.setRowWrapPolicy(QFormLayout.WrapLongRows)
-    # Combos and line edits fill the field column rather than sitting at their
-    # size hint, so a wider panel gives the controls the room.
+    # Combos and line edits fill the field column rather than sitting at their size hint.
     form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
     form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
@@ -279,8 +262,7 @@ def set_row_visible(form: QFormLayout, field: QWidget, visible: bool) -> None:
     """Show or hide a form row, label included. For settings a mode makes
     meaningless rather than merely inapplicable -- greying out (set_row_enabled)
     says 'not right now', hiding says 'not in this mode'."""
-    # setRowVisible, not setVisible on the widgets: hiding them individually
-    # leaves the row's slot in the grid and so a gap where it used to be.
+    # setRowVisible, not setVisible on the widgets: hiding them individually leaves the row's slot, and so a gap.
     form.setRowVisible(field, visible)
 
 

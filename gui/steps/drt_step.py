@@ -43,14 +43,10 @@ class _TwoLineLabel(QLabel):
     """A label of exactly two lines: one per line of the text it is given,
     each elided to the width available rather than wrapped.
 
-    Word wrapping was the original problem. A wrapped QLabel in a form layout
-    keeps the height it was first laid out at, so a value that spilled onto a
-    third rendered line lost it -- and the line that went missing was the fit
-    quality, the one that says whether the subtraction can be trusted. Eliding
-    caps the render at one line per line of text no matter how long a fitted
-    value or an error message turns out to be, and the size hints reserve the
-    two lines from the live font metrics, so the reservation still holds after
-    the stylesheet has changed the font.
+    A wrapped QLabel in a form layout keeps the height it was first laid out
+    at, so a value spilling onto a third rendered line lost it. The size hints
+    reserve the two lines from the live font metrics, so the reservation holds
+    after the stylesheet has changed the font.
     """
 
     def __init__(self, text: str = "", parent: Optional[QWidget] = None):
@@ -75,18 +71,12 @@ class _TwoLineLabel(QLabel):
 
     def _apply_elision(self) -> None:
         metrics = self.fontMetrics()
-        # A hard floor, not just a size hint: a hint is a preference a cramped
-        # form layout is free to compress below, and it did -- the row came out
-        # at 25 px where two lines need 30. Re-asserted here rather than set
-        # once in __init__ so it follows the font the stylesheet installs
-        # later. Guarded because setMinimumHeight can trigger a resize, and a
-        # resize comes back through this method.
+        # A hard floor, not a size hint a cramped form layout may compress below; guarded, since setMinimumHeight can trigger a resize back through here.
         two_lines = metrics.lineSpacing() * 2
         if self.minimumHeight() != two_lines:
             self.setMinimumHeight(two_lines)
 
-        # A couple of pixels back for the frame, so the last glyph is not
-        # shaved by a rounding error.
+        # A couple of pixels back for the frame, so the last glyph is not shaved by a rounding error.
         available = max(self.width() - 2, 10)
         super().setText(
             "\n".join(
@@ -118,8 +108,7 @@ class DRTStep(StepPage):
     def __init__(self, selection: SweepSelection, parent: Optional[QWidget] = None):
         super().__init__(parent)
 
-        # Plain tuples of option strings; core.drt keeps its pyimpspec imports
-        # inside its functions so reading these here stays free.
+        # Plain tuples of option strings; core.drt keeps its pyimpspec imports inside its functions, so reading these stays free.
         from core.drt import RBF_TYPES
         from core.ecm import DIFFUSION_PRESETS
 
@@ -139,11 +128,9 @@ class DRTStep(StepPage):
         )
         self._form = form
 
-        # First, because it decides which of the rows below matter; see
-        # _sync_relevance.
+        # First, because it decides which of the rows below matter; see _sync_relevance.
         method = SegmentedControl(["TR-RBF", "Bayesian"])
-        # Named *_radio though they are QToolButtons: same QAbstractButton API,
-        # and MainWindow._wire_steps reaches them by these names.
+        # Named *_radio though they are QToolButtons: same QAbstractButton API, and MainWindow._wire_steps reaches them by these names.
         self.trrbf_radio = method.button(0)
         self.trrbf_radio.setToolTip(
             "Tikhonov Regularization-Radial Basis Function"
@@ -156,8 +143,7 @@ class DRTStep(StepPage):
             "99% band and a dashed posterior mean in the sweep's own colour, and "
             "a CSV export gains three columns for them."
         )
-        # On the control, so the "Method" label has something to mirror; the
-        # two buttons keep their own, which win over this one on hover.
+        # On the control, so the "Method" label has something to mirror; the two buttons keep their own, which win on hover.
         method.setToolTip(
             "Which solver computes the distribution. Both fit the same "
             "TR-RBF model; Bayesian adds an uncertainty band at a large "
@@ -212,7 +198,9 @@ class DRTStep(StepPage):
         )
         form.addRow(self.remove_inductive_check)
 
-        self.subtract_diffusion_check = QCheckBox("Subtract diffusion tail (fitted)")
+        self.subtract_diffusion_check = QCheckBox(
+            "[BETA] Subtract diffusion tail (fitted)"
+        )
         self.subtract_diffusion_check.setToolTip(
             "Fit the model below to each sweep and subtract the fitted "
             "diffusion element's own impedance, so the low-frequency tail "
@@ -244,12 +232,10 @@ class DRTStep(StepPage):
         )
         form.addRow("Diffusion model", self.diffusion_cdc_combo)
 
-        # Two lines by construction: the element on the first, the fit quality
-        # on the second. See _TwoLineLabel for why the room is reserved.
+        # Two lines by construction: the element on the first, the fit quality on the second.
         self.diffusion_status_label = _TwoLineLabel("—")
         self.diffusion_status_label.setProperty("state", "muted")
-        # Top-aligned so the first line does not drift down the reserved space
-        # on the messages that only need one.
+        # Top-aligned so the first line does not drift down the reserved space on one-line messages.
         self.diffusion_status_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.diffusion_status_label.setToolTip(
             "The fitted diffusion parameters actually subtracted from the "
@@ -257,15 +243,9 @@ class DRTStep(StepPage):
             "a subtraction rewrites measured points: this is what says whether "
             "the flattened tail is a cleaned spectrum or an invented one."
         )
-        # Kept so MainWindow can append a failed fit's full message without
-        # losing the explanation -- the label itself only has room for a
-        # truncated one.
+        # Kept so MainWindow can append a failed fit's full message without losing the explanation the label has no room for.
         self.diffusion_status_tooltip = self.diffusion_status_label.toolTip()
-        # Spans both columns, so it carries its own "Subtracted:" prefix. In
-        # the value column it had 206 px to work with, and "pseudo chi-squared
-        # 0.0114" alone measures 208 -- it wrapped onto a line of its own and
-        # was then clipped, which is the whole complaint. Across both columns
-        # there is nearly twice that, and each line fits as written.
+        # Spans both columns, so it carries its own "Subtracted:" prefix: in the value column "pseudo chi-squared 0.0114" alone measured 208 px against the 206 available, and was clipped.
         form.addRow(self.diffusion_status_label)
 
         self.inductance_check = QCheckBox("Include series inductance (L)")
@@ -275,8 +255,7 @@ class DRTStep(StepPage):
             "constants. Distinct from the filter above, which discards the "
             "inductive points instead of modelling them."
         )
-        # Spans both columns: a checkbox is a complete statement, not a
-        # label/value pair.
+        # Spans both columns: a checkbox is a complete statement, not a label/value pair.
         form.addRow(self.inductance_check)
 
         form.addRow(
@@ -340,8 +319,7 @@ class DRTStep(StepPage):
         )
         form.addRow(self._shape_header)
 
-        # Paired on one row: the combo decides whether the spinbox is an FWHM
-        # coefficient or a shape factor.
+        # Paired on one row: the combo decides whether the spinbox is an FWHM coefficient or a shape factor.
         shape_row = QWidget()
         shape_layout = QHBoxLayout(shape_row)
         shape_layout.setContentsMargins(0, 0, 0, 0)
@@ -360,9 +338,7 @@ class DRTStep(StepPage):
         self.shape_coeff_spin.setValue(0.5)
         shape_layout.addWidget(self.shape_coeff_spin)
         self._shape_row = shape_row
-        # On the container, not the two children: it is the row's field widget,
-        # so this is what mirror_row_tooltips copies onto the "Shape control"
-        # label, and hovering either control shows it.
+        # On the container, not the two children: it is the row's field widget, so mirror_row_tooltips copies it onto the "Shape control" label.
         shape_row.setToolTip(
             "How the width beside it is specified. 'FWHM coefficient' sets the "
             "full width at half maximum as a fraction of the spacing between "
@@ -402,22 +378,18 @@ class DRTStep(StepPage):
             "many seconds pass; 0 disables the limit entirely."
         )
         form.addRow("Timeout [s]", self.timeout_spin)
-        # After the last row: the labels addRow() builds from a string have no
-        # tooltip, so hovering "Basis function" or "λ selection" would show the
-        # card's tooltip instead of the setting's.
+        # After the last row: the labels addRow() builds from a string have no tooltip, so hovering one would show the card's instead.
         mirror_row_tooltips(form)
         self.add_settings(settings_box)
 
         run_box, run_layout = group_box("Run DRT")
 
-        # One button, since the method is picked in the settings above -- and
-        # picking it there is what lets the irrelevant rows grey out.
+        # One button, since the method is picked in the settings above -- which is what lets the irrelevant rows grey out.
         self.run_drt_button = QPushButton("Run DRT")
         self.run_drt_button.setProperty("variant", "primary")
         run_layout.addWidget(self.run_drt_button)
 
-        # An output, so it sits with the action that produces it rather than
-        # among the inputs above.
+        # An output, so it sits with the action that produces it rather than among the inputs above.
         self._lambda_readout = QWidget()
         lambda_row = QHBoxLayout(self._lambda_readout)
         lambda_row.setContentsMargins(0, 0, 0, 0)
@@ -513,14 +485,12 @@ class DRTStep(StepPage):
 
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        # Pixels, not ratios -- setSizes takes real heights. An even split, so
-        # the DRT curve and whatever is read against it get the same room.
+        # Pixels, not ratios -- setSizes takes real heights. An even split, so both halves get the same room.
         splitter.setSizes([470, 470])
         splitter.setChildrenCollapsible(False)
         self.add_content(splitter, stretch=1)
 
-        # The three settings that decide whether other rows apply. Kept inside
-        # the step: this is presentation, and MainWindow never needs to know.
+        # The three settings that decide whether other rows apply; kept inside the step, being presentation only.
         for control in (self.trrbf_radio, self.bayesian_radio):
             control.toggled.connect(self._sync_relevance)
         self.rbf_combo.currentIndexChanged.connect(self._sync_relevance)
@@ -547,8 +517,7 @@ class DRTStep(StepPage):
         """
         form = self._form
 
-        # λ is not inert once a cross-validation method is chosen -- it becomes
-        # that optimiser's starting value -- so it is relabelled, not greyed.
+        # λ is not inert once a cross-validation method is chosen -- it becomes that optimiser's starting value -- so it is relabelled, not greyed.
         set_row_label(
             form,
             self.lambda_spin,
@@ -559,8 +528,7 @@ class DRTStep(StepPage):
         self._shape_header.setEnabled(shaped)
         set_row_enabled(form, self._shape_row, shaped)
 
-        # Not a pyimpspec rule but the same principle: neither the model nor
-        # the readout of what it subtracted means anything with the filter off.
+        # Not a pyimpspec rule but the same principle: neither the model nor the readout means anything with the filter off.
         subtracting = self.subtract_diffusion_check.isChecked()
         set_row_enabled(form, self.diffusion_cdc_combo, subtracting)
         set_row_enabled(form, self.diffusion_status_label, subtracting)

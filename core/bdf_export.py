@@ -14,10 +14,7 @@ import numpy as np
 if TYPE_CHECKING:
     from core.io_utils import EISDataset
 
-# Terms from the BDF application ontology, verified 2026-08-02 against
-# https://battery-data-alliance.github.io/battery-data-format-ontology/battery-data-format.html
-# Mapping is machine-readable name -> preferred label, and the preferred label
-# is what BDF puts in the header row.
+# BDF application ontology terms (verified 2026-08-02), as name -> preferred label.
 BDF_NAMESPACE = "https://w3id.org/battery-data-alliance/ontology/battery-data-format#"
 BDF_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("frequency_hertz", "Frequency / Hz"),
@@ -27,8 +24,7 @@ BDF_COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("phase_degree", "Phase / deg"),
 )
 
-# Quantities BDF has no term for. Under a URN so they read as app-local and
-# can never collide with a real BDF term added later.
+# Quantities BDF has no term for, under a URN so they cannot collide with a real one.
 LOCAL_NAMESPACE = "urn:eis-batch-analysis:term:"
 
 SPECTRUM_SUFFIX = ".bdf.csv"
@@ -59,8 +55,7 @@ def _num(value) -> str:
 
 
 def _write_csv(path: Path, header: Iterable[str], rows: Iterable[Iterable]) -> Path:
-    # newline="" per the csv module's own instruction; without it every row is
-    # followed by a blank line on Windows.
+    # newline="" per the csv module; without it every row gets a blank line on Windows.
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle)
         writer.writerow(list(header))
@@ -122,6 +117,21 @@ def write_residuals(path: Path, result) -> Path:
     )
 
 
+def _relative_error_percent(parameter) -> float:
+    """A fitted parameter's standard error as a percentage of its value.
+
+    pyimpspec divides by the value, which raises when a parameter settled on
+    exactly zero -- reachable, since a resistor and an inductor both have a
+    lower limit of 0. There is no percentage of nothing to report, so it comes
+    out as NaN and _num writes an empty cell, rather than one unlucky parameter
+    taking down an export of every sweep.
+    """
+    try:
+        return parameter.get_relative_error() * 100.0
+    except ZeroDivisionError:
+        return float("nan")
+
+
 def write_ecm_parameters(path: Path, fits: Dict[str, object]) -> Path:
     """Fitted circuit parameters for one sweep, one row per parameter."""
     rows = []
@@ -135,7 +145,7 @@ def write_ecm_parameters(path: Path, fits: Dict[str, object]) -> Path:
                     symbol,
                     _num(parameter.value),
                     _num(parameter.stderr),
-                    _num(parameter.get_relative_error() * 100.0),
+                    _num(_relative_error_percent(parameter)),
                     parameter.unit,
                     "true" if parameter.fixed else "false",
                     _num(result.pseudo_chisqr),
@@ -180,8 +190,7 @@ def write_drt(path: Path, result) -> Path:
         _, mean, lower, upper = result.get_drt_credible_intervals_data()
     except Exception:
         mean = lower = upper = None
-    # An empty array is how pyimpspec reports "no credible intervals" for a
-    # non-Bayesian run, so length-check rather than trusting the call alone.
+    # An empty array is how pyimpspec reports "no credible intervals", so length-check.
     if mean is not None and len(mean) == len(taus):
         header += ["eis:gamma_mean_ohm", "eis:gamma_lower_ohm", "eis:gamma_upper_ohm"]
         columns += [mean, lower, upper]
@@ -293,8 +302,7 @@ def build_sidecar(
         document["eis:analysis"] = analysis
 
     if metadata:
-        # Merged last so a caller can override anything above, and so future
-        # cell/instrument fields need no change here.
+        # Merged last so a caller can override anything above.
         document.update(metadata)
     return document
 
@@ -344,9 +352,7 @@ def export_batch(
 
     for sequence, dataset in enumerate(datasets, start=1):
         stem = file_stem(dataset, metadata, sequence)
-        # Two files with the same name can contribute same-labelled sweeps, and
-        # full_label is only unique within one file. Disambiguate rather than
-        # silently overwrite.
+        # full_label is unique only within one file, so disambiguate rather than overwrite.
         if stem in used_stems:
             used_stems[stem] += 1
             stem = f"{stem}_{used_stems[stem]}"

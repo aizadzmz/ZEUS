@@ -32,8 +32,7 @@ def _calculate_curvatures(Z: NDArray[np.complex128]) -> NDArray[np.float64]:
         np.clip(cos_alpha, -1.0, 1.0, out=cos_alpha)
         abs_kappa = 2.0 * np.sin(np.arccos(cos_alpha)) / c_norm
 
-    # Sign of det([[Re, -Im, 1], ...]) over each consecutive triple: negative
-    # for clockwise Nyquist motion when sorted by decreasing frequency.
+    # Sign of det([[Re, -Im, 1], ...]) per triple: negative for clockwise Nyquist motion.
     u = Z.real
     v = -Z.imag
     u1, u2, u3 = u[:-2], u[1:-1], u[2:]
@@ -64,13 +63,9 @@ def _patch_calculate_curvatures() -> None:
         module.calculate_curvatures = _calculate_curvatures
 
 
-# --------------------------------------------------------------------------
-# Impedance memoisation during a Kramers-Kronig run
-# --------------------------------------------------------------------------
+# --- Impedance memoisation during a Kramers-Kronig run ---
 
-# Active cache for the calling thread, or None when no Kramers-Kronig test is
-# running here. Thread-local because ValidationWorker runs tests off the UI
-# thread while the UI thread may be evaluating its own circuits for plots.
+# Cache for the calling thread; thread-local since validation runs off the UI thread.
 _impedance_cache = threading.local()
 
 
@@ -91,9 +86,7 @@ def _patch_circuit_get_impedances() -> None:
         hit = cache.get(key)
         if hit is None:
             Z = original_get_impedances(self, frequencies)
-            # Always hand out a fresh array and keep the cached one private:
-            # pyimpspec callers modify the array in place, so sharing it would
-            # let one caller inherit another's edits and corrupt the fit.
+            # Hand out a fresh array: pyimpspec callers modify it in place.
             cache[key] = (self, Z.copy())  # circuit ref pins id() in the key
             return Z
 

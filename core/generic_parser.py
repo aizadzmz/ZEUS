@@ -11,9 +11,7 @@ from pyimpspec import DataSet
 
 from core.io_utils import EISDataset, EISParseError
 
-# Role -> set of normalized header "bodies" that identify it. Units/symbols
-# are stripped before matching (see _normalize_header), so "freq/Hz" and
-# "Frequency (Hz)" both normalize to "freq"/"frequency".
+# Role -> normalized header "bodies" identifying it; units/symbols are stripped first.
 _ROLE_ALIASES = {
     "frequency": {"freq", "frequency", "f"},
     "re": {"re", "z'", "zre", "real"},
@@ -73,14 +71,10 @@ def _read_rows(path: Path, encoding: str) -> Tuple[List[str], List[List[str]]]:
     return _split_rows(_read_lines(path, encoding))
 
 
-# How much of a row must parse as a number for it to be data rather than
-# prose. Not all of it: instruments write text flags ("OK", "ovl", a range
-# code) into otherwise numeric rows, and the header itself is occasionally
-# half numeric ("I/mA", "1", "2").
+# How much of a row must parse as a number to be data rather than prose -- not all of it, since instruments write text flags into otherwise numeric rows.
 _DATA_ROW_FRACTION = 0.6
 
-# Below this many columns a numeric line is not a sweep row -- it is a
-# metadata line that happens to hold a number, like "Cell area: 1.0".
+# Below this many columns a numeric line is metadata, not a sweep row ("Cell area: 1.0").
 _MIN_DATA_COLUMNS = 2
 
 
@@ -100,16 +94,10 @@ def _numeric_fraction(cells: List[str]) -> float:
 
 
 def _choose_delimiter(lines: List[str]) -> Optional[str]:
-    """The character separating columns, judged over the whole file.
-
-    Not from the first line alone, which is only the header when nothing sits
-    above it. Instruments routinely write a title block first, and a title is
-    prose -- the comma in 'Date: Jan 1, 2026' would otherwise decide that the
-    file is comma-separated and split every real row in the wrong places.
-
-    A true delimiter appears the *same* number of times on almost every line,
-    since every row has the same columns; prose punctuation does not. That
-    consistency is what is scored here, rather than mere presence.
+    """The character separating columns, judged over the whole file rather than
+    from the first line alone, which is only the header when nothing sits above
+    it. A true delimiter appears the *same* number of times on almost every
+    line, and that consistency is what is scored here.
     """
     best: Optional[str] = None
     best_score = 0
@@ -139,42 +127,30 @@ def _first_data_row(rows: List[List[str]]) -> Optional[int]:
 
 def _split_rows(lines: List[str]) -> Tuple[List[str], List[List[str]]]:
     """Hand-split every line/cell in pure Python, and find where the table
-    starts.
-
-    The header is located rather than assumed to be line one: a plain .txt
-    export often carries an instrument title, a timestamp and a settings block
-    above its column names. Taking line one on faith turned those into the
-    headers and then dropped every real row for not matching their width, so
-    the file arrived with no data and a column dialog listing words from a
-    sentence.
+    starts. The header is located rather than assumed to be line one: a plain
+    .txt export often carries a title and a settings block above its column
+    names.
     """
     delimiter = _choose_delimiter(lines)
     if delimiter:
-        # csv.reader, not str.split, so quoted fields (Excel's "CSV UTF-8"
-        # export wraps every field in "...") are unquoted correctly.
+        # csv.reader, not str.split, so Excel's fully quoted "CSV UTF-8" export unquotes.
         rows = list(csv.reader(lines, delimiter=delimiter))
     else:
-        # Bare str.split() splits on any run of whitespace and runs in C,
-        # unlike re.split(r"\s+", ...); this runs once per line.
+        # Bare str.split() splits on any whitespace run and runs in C, unlike re.split.
         rows = [ln.split() for ln in lines]
 
     rows = [[cell.strip() for cell in row] for row in rows]
 
-    # No numeric row anywhere: fall back to the old assumption so the caller
-    # raises its own "no numeric data rows" against real headers.
+    # No numeric row anywhere: fall back so the caller raises against real headers.
     first_data = _first_data_row(rows)
     if first_data is None:
         first_data = 1
 
-    # A trailing delimiter yields a phantom empty field (BioLogic exports end
-    # every row with a tab). Trim so the header width matches the data width,
-    # instead of silently dropping every row.
+    # A trailing delimiter yields a phantom empty field (BioLogic ends rows with a tab).
     if first_data > 0:
         headers = _rstrip_blanks(rows[first_data - 1])
     else:
-        # The table starts on line one, so there are no names to read. Give
-        # the columns positional ones: the import dialog needs something to
-        # label them with, and the caller can still be handed a mapping.
+        # The table starts on line one, so give the columns positional names for the dialog.
         headers = [f"Column {i + 1}" for i in range(len(_rstrip_blanks(rows[0])))]
 
     ncols = len(headers)
@@ -293,9 +269,7 @@ def parse_generic_file(
         theta = np.radians(phase_deg)
         z = mag * np.cos(theta) + 1j * mag * np.sin(theta)
 
-    # Instruments pad a sweep out to a fixed row count with all-zero rows
-    # (and unparseable cells above became NaN); f <= 0 is not a measurable
-    # EIS point in any case.
+    # Instruments pad sweeps out with all-zero rows, and f <= 0 is not a measurable point.
     valid = np.isfinite(freqs) & (freqs > 0.0) & np.isfinite(z)
     frequencies = freqs[valid]
     impedances = z[valid]
@@ -341,11 +315,7 @@ def _split_into_sweeps(
         if direction == 0:
             direction = cur_dir
         elif cur_dir != direction:
-            # A down-then-up (or up-then-down) run usually measures the
-            # turning-point frequency twice, once per direction. Cut between
-            # those two rows so each sweep keeps its own copy -- cutting at i
-            # instead would leave both in the outgoing sweep, i.e. a repeated
-            # frequency that DataSet rejects.
+            # A down-then-up run measures the turning-point frequency twice; cut between those two rows so each sweep keeps its own copy.
             cut = i - 1 if frequencies[i - 1] == frequencies[i - 2] else i
             sweeps.append((frequencies[start:cut], impedances[start:cut]))
             start = cut

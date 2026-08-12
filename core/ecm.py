@@ -3,16 +3,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional, Tuple
 
-# pyimpspec is imported inside each function, and annotations are strings via
-# the __future__ import, so the GUI can read the option tuples below without
-# paying pyimpspec's ~4 s import.
+# pyimpspec is imported per function, so the GUI can read the option tuples below free.
 if TYPE_CHECKING:
     from pyimpspec.analysis.fitting import FitResult
 
-# (menu label, circuit description code). CDC syntax is Boukamp's: square
-# brackets are series, parentheses parallel, so R(RC) is a resistor in series
-# with a parallel RC pair. The outermost series brackets are implicit, which is
-# why canonical_cdc() output is stored rather than these strings.
+# (menu label, CDC) in Boukamp's syntax: brackets series, parentheses parallel, outermost brackets implicit -- hence canonical_cdc() output is what gets stored.
 CIRCUIT_PRESETS = (
     ("Randles", "R(RW)"),
     ("Randles + double layer", "R(C[RW])"),
@@ -24,9 +19,7 @@ CIRCUIT_PRESETS = (
     ("Finite-length Warburg", "R(Q[RWs])"),
 )
 
-# Elements whose impedance is a mass-transport (diffusion) response, as opposed
-# to a kinetic or geometric one. Read by core.filtering to find the term to
-# subtract; the symbols are pyimpspec's own, per get_elements().
+# Mass-transport (diffusion) elements, by pyimpspec's own symbols; read by core.filtering.
 DIFFUSION_SYMBOLS = frozenset(
     {
         "W", "Ws", "Wo",           # Warburg: semi-infinite, transmissive, reflective
@@ -36,11 +29,7 @@ DIFFUSION_SYMBOLS = frozenset(
     }
 )
 
-# (menu label, CDC) for the DRT step's tail subtraction. Every one ends in a
-# diffusion element in *series* with the rest, which is what makes subtracting
-# it exact -- see core.filtering._series_diffusion_elements. That rules out
-# CIRCUIT_PRESETS' "R(Q[RWs])", where the Ws sits inside a parallel branch, so
-# these are a separate list rather than a filtered view of that one.
+# (menu label, CDC) for the DRT step's tail subtraction; each ends in a diffusion element in *series*, which is what makes subtracting it exact.
 DIFFUSION_PRESETS = (
     ("Warburg (semi-infinite)", "R(RQ)W"),
     ("Warburg, transmissive", "R(RQ)Ws"),
@@ -137,19 +126,8 @@ def run_ecm_fit_seeded(
 
 def ohmic_resistance(frequencies, impedances) -> float:
     """Re(Z) where the spectrum crosses the real axis, scanning down from the
-    highest frequency.
-
-    Deliberately not Re(Z) at the highest frequency, which is the textbook
-    high-frequency intercept and what this function used to return. That
-    reading assumes the sweep starts on the real axis, and a cell with cabling
-    inductance does not: it spends its first decades well above the axis, so
-    the first point is measuring the inductor, not the electrolyte. On the
-    demo cells that puts the estimate out by 1.7-4.8x -- 0.029 ohm against a
-    true 0.0073 -- and any polarisation resistance derived by subtracting it
-    comes out negative.
-
-    Falls back to the first point when the sweep never crosses, which is the
-    case the high-frequency reading was right about all along.
+    highest frequency. Falls back to the first point when the sweep never
+    crosses, which a cell with cabling inductance always does.
     """
     import numpy as np
 
@@ -161,9 +139,7 @@ def ohmic_resistance(frequencies, impedances) -> float:
     if len(crossings) == 0:
         return float(real[0])
 
-    # Interpolated between the two points straddling the axis: at these
-    # magnitudes the gap between adjacent points is a large fraction of the
-    # polarisation resistance being estimated.
+    # Interpolated between the straddling points: adjacent points sit far apart relative to the polarisation resistance being estimated.
     i = crossings[0]
     span = imag[i] - imag[i + 1]
     if span == 0:

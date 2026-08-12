@@ -6,11 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "cvxopt>=1.3.3",
     "numpy>=2.5.1",
-    # Upper bound is deliberate: core/_pyimpspec_patches.py rebinds private
-    # internals (calculate_curvatures across five kramers_kronig.algorithms
-    # modules, Circuit.get_impedances, suggest_num_RC) and raises at import if
-    # any of them move. A minor upgrade would take the Validation step out
-    # entirely, so it has to be a decision, not a side effect of a re-lock.
+    # Upper bound is deliberate: core/_pyimpspec_patches.py rebinds private internals and raises at import if any of them move, so a minor upgrade would take the Validation step out entirely.
     "pyimpspec>=5.1.3,<5.2",
     "pyqtdarktheme-fork>=2.3.6",
     "pyqtgraph>=0.14.0",

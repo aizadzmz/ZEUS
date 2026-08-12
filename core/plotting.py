@@ -12,21 +12,15 @@ from PySide6.QtCore import QPointF, QRectF, QSizeF, Qt
 from PySide6.QtGui import QFont, QFontMetricsF, QPolygonF
 from PySide6.QtWidgets import QSizePolicy
 
-# Annotation-only: core.io_utils costs ~4 s to import (pyimpspec -> scipy,
-# sympy), and keeping it off the runtime path lets the GUI build figure panes
-# without loading the analysis stack.
+# Annotation-only: core.io_utils costs ~4 s to import, so keeping it off the runtime path lets the GUI build figure panes without the analysis stack.
 if TYPE_CHECKING:
     from core.io_utils import EISDataset
 
-# Gold crosshair marking Z'=0 and -Z''=0 on Nyquist plots, drawn heavier than
-# the grid so the origin reads as a reference rather than a gridline.
+# Gold crosshair marking Z'=0 and -Z''=0, drawn heavier than the grid so the origin reads as a reference rather than a gridline.
 ORIGIN_COLOR = "#CC9D33"
 ORIGIN_WIDTH = 2.0
 
-# The app's color cycle (matplotlib's tab10), with the leading blue swapped for
-# the accent so a single-sweep plot is on-brand. The rest stay categorical --
-# distinguishing sweeps beats matching the palette. tab10's grey is dropped:
-# it sat too close to _REMOVED_COLOR to tell a live sweep from a masked point.
+# The app's color cycle (matplotlib's tab10) with the leading blue swapped for the accent; tab10's grey is dropped, having sat too close to _REMOVED_COLOR.
 SERIES_COLORS = (
     "#2b3f9e", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
     "#8c564b", "#e377c2", "#bcbd22", "#17becf",
@@ -43,54 +37,28 @@ def _with_alpha(color: str, alpha: int) -> pg.QtGui.QColor:
     return shaded
 
 
-# What the Bayesian DRT run's extra output is called in a legend. pyimpspec
-# takes the 0.5% and 99.5% quantiles of its HMC samples, so the band spans the
-# central 99% of the posterior -- upstream's own plots call that "3σ", which is
-# the Gaussian approximation of it rather than what the code computes.
+# What the Bayesian DRT run's extra output is called in a legend: pyimpspec's 0.5%/99.5% HMC quantiles, i.e. the central 99% of the posterior.
 CREDIBLE_INTERVAL_NAME = "mean, 99% CI"
 
-# Residual series names, keyed by core.validation.RESIDUAL_MODES. The keys are
-# spelled out rather than imported: core.validation pulls in pyimpspec, and
-# this module is imported to build figure panes long before the analysis stack
-# is wanted (see the TYPE_CHECKING note above). test_validation pins the two
-# lists together so a new mode cannot land here unnamed.
+# Residual series names, keyed by core.validation.RESIDUAL_MODES; spelled out rather than imported because core.validation pulls in pyimpspec.
 _RESIDUAL_SERIES_NAMES = {
     "modulus": ("ΔZ' / |Z|", "ΔZ'' / |Z|"),
     "component": ("ΔZ' / Z'", "ΔZ'' / Z''"),
 }
 
-# Residual axis framing, in percentage points above the highest limit line.
-#
-# The figure exists to show which points cleared the limit, so the limit is
-# what the axis is built around: a residual well past it only has to read as
-# "well past", and letting one set the scale flattens everything else onto the
-# zero line -- the uncapped component convention reports 1e17% for a part that
-# rounds to zero. Anything beyond the edge is pinned there and marked.
-#
-# Fixed rather than fitted to the data, so the scale does not jump as the pager
-# steps between sweeps.
-_AXIS_HEADROOM_PERCENT = 5.0
+# Residual axis framing, in percentage points above the highest limit line; fixed rather than fitted, so the scale does not jump as the pager steps between sweeps.
+_AXIS_HEADROOM_PERCENT = 1.0
 
-# Fallback for a figure drawn with no limit lines at all, where there is no
-# limit to take headroom from. At 100% the error is the size of the quantity it
-# is measured against, so the value past that says only "not resolved".
+# Fallback for a figure drawn with no limit lines at all, where there is no limit to take headroom from.
 _MAX_RESIDUAL_AXIS_PERCENT = 100.0
 
-# Which Bode series belongs to which axis. Sits under the title rather than in
-# the legend, which is per-sweep.
+# Which Bode series belongs to which axis; sits under the title rather than in the per-sweep legend.
 BODE_SUBTITLE = "|Z| ●   ,   -Φ ○"
 
-# Title-row height in px for the two-line Bode title (PlotItem.setTitle sizes
-# for one line). Raise it if the subtitle wraps or the font grows.
+# Title-row height in px for the two-line Bode title (PlotItem.setTitle sizes for one line).
 BODE_TITLE_HEIGHT = 48
 
-# The marker shapes a file can be given, in menu order. All filled: the Bode
-# plot spends the filled/hollow distinction on telling |Z| from -Φ (see
-# BODE_SUBTITLE), so offering a hollow marker would collide with it. "x" and
-# "+" are excluded too -- "x" marks removed points (see _add_removed_series)
-# and "+" is too near it to tell apart.
-#
-# (label, pyqtgraph symbol)
+# The marker shapes a file can be given, in menu order, as (label, pyqtgraph symbol). All filled: the Bode plot spends the filled/hollow distinction on |Z| vs -Φ, and "x"/"+" mark removed points.
 MARKER_SHAPES: Tuple[Tuple[str, str], ...] = (
     ("Circle", "o"),
     ("Square", "s"),
@@ -108,9 +76,7 @@ DEFAULT_MARKER = "o"
 DEFAULT_MARKER_SIZE = 6.0
 DEFAULT_LINE_WIDTH = 1.5
 
-# The default shape per loaded file, by the file's position: sweeps that share
-# a color because they share an index within their own file still read apart.
-# Overridden per file from the Marker & line style dialog.
+# The default shape per loaded file, by the file's position; overridden from the Marker & line style dialog.
 PG_MARKERS: Tuple[str, ...] = tuple(symbol for _, symbol in MARKER_SHAPES)
 
 
@@ -120,8 +86,7 @@ def default_marker_for(position: int) -> str:
     return PG_MARKERS[position % len(PG_MARKERS)]
 
 
-# ds.key -> (color, pyqtgraph symbol), built by the GUI so every step draws a
-# given sweep the same way. See gui/main_window.py _build_style_map.
+# ds.key -> (color, pyqtgraph symbol), built by gui/main_window.py _build_style_map so every step draws a sweep the same way.
 StyleMap = Dict[str, Tuple[str, str]]
 
 
@@ -164,11 +129,8 @@ def _engineering_exponent(max_abs: float) -> int:
 
 def _close_plot_box(plot_item) -> None:
     """Draw the top and right borders, so a plot reads as a closed box rather
-    than an L of two axes.
-
-    The extra axes carry no ticks or label -- they exist only for their line.
-    The margins give that line somewhere to sit: a bare AxisItem has ~0
-    height, so without them it lands hard against the widget edge and clips.
+    than an L of two axes. The extra axes carry no ticks or label, and the
+    margins are what keep their line off the widget edge.
     """
     plot_item.layout.setContentsMargins(1, 6, 12, 12)  # left, top, right, bottom
     for side in ("top", "right"):
@@ -179,17 +141,11 @@ def _close_plot_box(plot_item) -> None:
 
 
 def _hide_plot_options_menu(plot_item) -> None:
-    """Drop the "Plot Options" submenu from a plot's right-click menu.
-
-    The PlotItem's own menu -- transforms, downsampling, averaging, alpha --
-    assumes a plain plot whose items it owns, and crashes on the plots built
-    here (custom axis items, a second ViewBox, items added straight to the
-    scene). The ViewBox's own entries, View All and the axis/mouse-mode
-    controls, are unaffected: the scene skips a PlotItem whose menu is
-    disabled when it collects parent menus.
+    """Drop the "Plot Options" submenu from a plot's right-click menu, which
+    assumes a plain plot whose items it owns and crashes on the plots built
+    here. The ViewBox's own entries are unaffected.
     """
-    # enableViewBoxMenu=None: leave the ViewBox menu exactly as it is, rather
-    # than the 'same' default, which would take it down along with this one.
+    # enableViewBoxMenu=None: leave the ViewBox menu alone, rather than the 'same' default, which would take it down too.
     plot_item.setMenuEnabled(False, None)
 
 
@@ -206,13 +162,21 @@ class _ScaledAxisItem(pg.AxisItem):
     def __init__(self, *args, exponent: int = 0, **kwargs):
         super().__init__(*args, **kwargs)
         self._exponent = exponent
-        # Required: otherwise AxisItem appends its own "(x...)" scale factor
-        # under range 1, which duplicates or contradicts the label.
+        # Required: otherwise AxisItem appends its own "(x...)" scale factor under range 1.
         self.enableAutoSIPrefix(False)
 
     def tickStrings(self, values, scale, spacing):
         factor = 10 ** self._exponent
         return [f"{v / factor:.4g}" for v in values]
+
+
+def _log10(values) -> np.ndarray:
+    """log10 for the Bode axes, where a zero is an ordinary thing to be handed:
+    a padded or failed row carries |Z| = 0, and f = 0 reaches here through a
+    restored session. -inf is the honest answer and _bounds drops it from the
+    framing, so the warning numpy would print is noise on a decided case."""
+    with np.errstate(divide="ignore"):
+        return np.log10(values)
 
 
 def _max_abs_extent(datasets: List[EISDataset], show_removed: bool) -> float:
@@ -235,8 +199,7 @@ def point_tip(data) -> str:
     payload rather than the plotted position.
 
     `note` qualifies the set line: "removed" on a masked point, "off scale" on
-    a residual pinned to the axis edge. Spelled out by the payload rather than
-    derived here, so a plot can say what its own outliers mean."""
+    a residual pinned to the axis edge."""
     note = data.get("note") or ("removed" if data.get("removed") else "")
     suffix = f" ({note})" if note else ""
     return (
@@ -298,8 +261,7 @@ def _marker_kwargs(
     """ScatterPlotItem styling for one series: filled in the dataset's color,
     or outlined when hollow. symbol=None leaves pyqtgraph's default ('o')."""
     if hollow:
-        # The outline scales with the marker: a 1.2px ring around an 18px
-        # marker reads as a thin grey circle rather than the sweep's color.
+        # The outline scales with the marker: a fixed 1.2px ring around an 18px marker reads as grey.
         kwargs = dict(brush=None, pen=pg.mkPen(color, width=max(1.0, size / 5.0)), size=size)
     else:
         kwargs = dict(brush=pg.mkBrush(color), pen=None, size=size)
@@ -325,12 +287,10 @@ def _add_kept_series(
     """Draw one dataset's kept points and return the hoverable ScatterPlotItem.
 
     `hollow` outlines the markers; `dashed` dashes the line. Bode passes both
-    for its phase series, so it stays distinct from the magnitude series
-    whichever fill Plot Options is set to.
+    for its phase series.
     """
     if style == "line":
-        # The line carries the legend entry, so the swatch shows a colored
-        # line rather than a marker; the scatter stays unnamed.
+        # The line carries the legend entry, so the swatch shows a colored line; the scatter stays unnamed.
         pen = pg.mkPen(
             color, width=line_width, style=Qt.DashLine if dashed else Qt.SolidLine
         )
@@ -361,10 +321,7 @@ def _add_kept_series(
 def _add_removed_series(container, x, y, tip_data, size: float = DEFAULT_MARKER_SIZE):
     """Draw masked-out points as muted 'x' markers in `container` (a PlotItem or
     a bare ViewBox, as the Bode phase axis is). Returns the ScatterPlotItem, or
-    None if there are no removed points.
-
-    Sized with the live markers so the two stay comparable -- a fixed 6px 'x'
-    disappears under 16px sweep markers."""
+    None if there are no removed points."""
     if x.size == 0:
         return None
 
@@ -403,14 +360,29 @@ def _bounds(
     equal_aspect: bool = True,
 ) -> Optional[Tuple[float, float, float, float]]:
     """Framing for the given points, or None when there are none (callers fall
-    back rather than setting a degenerate zero-span range)."""
-    if not xs:
-        return None
-    xmin, xmax = min(xs), max(xs)
-    ymin, ymax = min(ys), max(ys)
+    back rather than setting a degenerate zero-span range).
 
-    # Breathing room so a point at an extreme isn't sliced by the ViewBox edge
-    # (padding=0 below draws the range exactly).
+    Points that are not finite are dropped rather than framed. A sweep carrying
+    |Z| = 0 or f = 0 takes log10 of zero on the Bode axes, and a single -inf
+    would otherwise poison the range and leave pyqtgraph nothing it can set --
+    it raises on a non-finite one. The point is genuinely off-scale, so leaving
+    it out of the framing is what it deserves; _collect_drt_bounds screens the
+    DRT plot the same way.
+    """
+    finite_xs: List[float] = []
+    finite_ys: List[float] = []
+    # Paired, not filtered per axis: dropping one coordinate of a point would
+    # slide the two lists out of step and frame against a point that never was.
+    for x, y in zip(xs, ys):
+        if math.isfinite(x) and math.isfinite(y):
+            finite_xs.append(x)
+            finite_ys.append(y)
+    if not finite_xs:
+        return None
+    xmin, xmax = min(finite_xs), max(finite_xs)
+    ymin, ymax = min(finite_ys), max(finite_ys)
+
+    # Breathing room so a point at an extreme isn't sliced by the ViewBox edge (padding=0 below).
     margin = 0.05
     x_pad = (xmax - xmin) * margin or 1e-6
     y_pad = (ymax - ymin) * margin or 1e-6
@@ -421,10 +393,7 @@ def _bounds(
     return equal_aspect_limits(xlo, xhi, ylo, yhi, include_origin=include_origin)
 
 
-# Separator between the file name and the sweep label in a legend entry --
-# mirrors EISDataset.qualified_label, which core.plotting can't import at
-# runtime (see the TYPE_CHECKING note above). Eliding splits on the *last*
-# occurrence, so a file name containing the separator stays harmless.
+# Separator between file name and sweep label in a legend entry, mirroring EISDataset.qualified_label; eliding splits on the *last* occurrence.
 _LABEL_SEPARATOR = " · "
 
 
@@ -436,13 +405,7 @@ class _GroupHeader(pg.GraphicsWidget):
     HEIGHT = 19.0
     CHEVRON_BOX = 12.0  # square the arrow is drawn inside, left of the text
     CHEVRON_SIZE = 4.0  # half-width of the arrow itself
-    # Roughly how many characters of the file name to show. Measured in
-    # characters rather than pixels so the header reads the same length on
-    # every display: a pixel budget is a share of the pane's logical width,
-    # which differs between a scaled laptop panel and an external monitor,
-    # and the point size renders at a different pixel height on each. Both
-    # cancel out here, because the width comes from the same font metrics
-    # that draw the text.
+    # Roughly how many characters of the file name to show -- characters, not pixels, so the header reads the same length on every display.
     MAX_NAME_CHARS = 26
 
     def __init__(self, title: str, font: QFont, color, on_toggle):
@@ -487,8 +450,7 @@ class _GroupHeader(pg.GraphicsWidget):
         middle = rect.height() / 2.0
         size = self.CHEVRON_SIZE
         centre = self.CHEVRON_BOX / 2.0
-        # Right-pointing when folded, down-pointing when open -- the same
-        # convention as a file tree.
+        # Right-pointing when folded, down-pointing when open -- the same convention as a file tree.
         if self.collapsed:
             points = [(centre - size / 2, middle - size), (centre - size / 2, middle + size),
                       (centre + size, middle)]
@@ -530,23 +492,18 @@ class _LegendGroup:
 
 
 class _LinkedSample(pg.ItemSample):
-    """A legend swatch that shows and hides a whole family of plot items.
-
-    "Removed" and "Fit" are single legend entries standing for one series per
-    sweep -- and on the Bode plot, one per ViewBox on top of that. pyqtgraph's
-    swatch toggles only the item it was built from, so clicking it hid one
-    sweep's markers and left every other sweep's on the plot."""
+    """A legend swatch that shows and hides a whole family of plot items --
+    "Removed" and "Fit" are single entries standing for one series per sweep,
+    and pyqtgraph's own swatch toggles only the item it was built from."""
 
     def __init__(self, items):
-        # The first item is the one pyqtgraph paints the swatch from; the rest
-        # follow its visibility.
+        # The first item is the one pyqtgraph paints the swatch from; the rest follow its visibility.
         super().__init__(items[0])
         self._linked = list(items[1:])
 
     def mouseClickEvent(self, event):
         super().mouseClickEvent(event)
-        # Read back rather than inverted a second time: the base only toggles
-        # on a left click, and this way the family cannot drift out of step.
+        # Read back rather than inverted a second time: the base only toggles on a left click.
         for item in self._linked:
             item.setVisible(self.item.isVisible())
 
@@ -556,26 +513,20 @@ class _OutsideLegend(pg.LegendItem):
     file header, long names elide instead of stealing width from the axes, and
     the whole column scrolls rather than being clipped."""
 
-    # Share of the plot widget's width the legend may claim before its labels
-    # start eliding. A batch of long file names would otherwise squeeze the
-    # axes down to a strip.
+    # Share of the plot widget's width the legend may claim before its labels start eliding.
     MAX_WIDTH_FRACTION = 0.2
 
     def __init__(self, **kwargs):
         super().__init__(offset=None, colCount=1, **kwargs)
-        # No backing plate or border: outside the plot there is nothing to
-        # mask, and a box would just add a second frame beside the axes.
+        # No backing plate or border: outside the plot there is nothing to mask.
         self.setBrush(pg.mkBrush(0, 0, 0, 0))
         self.setPen(pg.mkPen(0, 0, 0, 0))
-        # Fixed vertically so the grid gives it its content height. Stretching
-        # separates each swatch (centred in its row) from its label (drawn at
-        # the top of one).
+        # Fixed vertically so the grid gives it its content height; stretching separates each swatch from its label.
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self._groups: List[_LegendGroup] = []
         self._current_key = None
         self._busy = False
-        # Set by the viewport that owns us; it has to re-clamp its scroll
-        # whenever the content height changes.
+        # Set by the viewport that owns us; it re-clamps its scroll when the content height changes.
         self.on_contents_changed = lambda: None
 
     # -- grouping ---------------------------------------------------------
@@ -600,8 +551,7 @@ class _OutsideLegend(pg.LegendItem):
             )
             header.setParentItem(self)
         group = _LegendGroup(key, header)
-        # The ungrouped tail always sorts last, so "Fit" and "Removed" stay
-        # below every file no matter when they were registered.
+        # The ungrouped tail always sorts last, so "Fit" and "Removed" stay below every file.
         if key is None:
             self._groups.append(group)
         else:
@@ -612,9 +562,8 @@ class _OutsideLegend(pg.LegendItem):
     # -- entries ----------------------------------------------------------
     def addItem(self, item, name):
         """Add an entry, keeping the full name for the tooltip and for eliding.
-
-        LabelItem drops its text into an HTML span, so the name is escaped on
-        the way in; `_full_text` keeps the original to re-elide from."""
+        LabelItem drops its text into an HTML span, so the name is escaped on the
+        way in and `_full_text` keeps the original to re-elide from."""
         super().addItem(item, escape(name))
         entry = self.items[-1]
         _, label = entry
@@ -625,8 +574,7 @@ class _OutsideLegend(pg.LegendItem):
         self._relayout()
 
     def _addItemToLayout(self, sample, label):
-        # Placement is _relayout's job: it interleaves the group headers, which
-        # pyqtgraph's row-filling knows nothing about.
+        # Placement is _relayout's job: it interleaves the group headers pyqtgraph knows nothing about.
         pass
 
     def _relayout(self) -> None:
@@ -644,8 +592,7 @@ class _OutsideLegend(pg.LegendItem):
                     self.layout.addItem(group.header, row, 0, 1, 2)
                     row += 1
                 for sample, label in group.entries:
-                    # removeAt() only unhooks from the layout; without this the
-                    # rows of a folded group stay painted where they last sat.
+                    # removeAt() only unhooks from the layout; without this a folded group's rows stay painted.
                     sample.setVisible(not group.collapsed)
                     label.setVisible(not group.collapsed)
                     if group.collapsed:
@@ -670,8 +617,7 @@ class _OutsideLegend(pg.LegendItem):
         self.setGeometry(QRectF(self.pos(), hint))
 
     def mouseDragEvent(self, ev):
-        # LegendItem drags itself to a new anchor; here it lives in the plot's
-        # grid and the drag would fight the viewport's scrolling.
+        # LegendItem drags itself to a new anchor, which would fight the viewport's scrolling.
         ev.ignore()
 
     # -- eliding ----------------------------------------------------------
@@ -698,13 +644,9 @@ class _OutsideLegend(pg.LegendItem):
 
     def elide_to_width(self, available: float) -> None:
         """Shorten headers and labels so the legend needs no more than
-        `available` px.
-
-        A header is the whole file name and elides from the middle: batch
-        exports share a long prefix and differ near the end, so both ends have
-        to survive. Entries below it read 'Set NN' and rarely need touching --
-        but the flat legends (DRT, residuals) put their whole name here, so
-        they elide by the same rule."""
+        `available` px. A header is the whole file name and elides from the
+        middle, batch exports sharing a long prefix; the entries below it elide
+        by the same rule."""
         if self._busy or available <= 0:
             return
         self._busy = True
@@ -716,8 +658,7 @@ class _OutsideLegend(pg.LegendItem):
             if budget > 0:
                 metrics = QFontMetricsF(self._label_font())
                 for _, label in self.items:
-                    # Always elide from the original: re-eliding an elided
-                    # string erodes it a little further on every resize.
+                    # Always elide from the original: re-eliding an elided string erodes it further on every resize.
                     full = getattr(label, "_full_text", label.text)
                     shown = _elide_entry(metrics, full, budget)
                     if shown != getattr(label, "_shown_text", None):
@@ -731,10 +672,8 @@ class _OutsideLegend(pg.LegendItem):
 
 class _LegendViewport(pg.GraphicsWidget):
     """Clips the legend to the height the pane can spare and scrolls it there.
-
-    The legend is a child item rather than a layout item: a QGraphicsLayout
-    would squeeze its rows to fit the cap instead of letting them overflow, and
-    overflow is the whole point of scrolling."""
+    The legend is a child item rather than a layout item, so its rows overflow
+    instead of being squeezed to fit the cap."""
 
     SCROLLBAR_WIDTH = 5.0
     WHEEL_STEP = 40.0  # px per notch
@@ -750,8 +689,7 @@ class _LegendViewport(pg.GraphicsWidget):
 
     def sizeHint(self, which, constraint=QSizeF()):
         hint = self.legend.effectiveSizeHint(which, constraint)
-        # The gutter is always reserved, not only while scrollable: letting it
-        # come and go would resize the plot every time a group is folded.
+        # The gutter is always reserved, so folding a group does not resize the plot.
         return QSizeF(hint.width() + self.SCROLLBAR_WIDTH, hint.height())
 
     def set_available_height(self, available: float) -> None:
@@ -765,11 +703,8 @@ class _LegendViewport(pg.GraphicsWidget):
 
     def _contents_changed(self) -> None:
         """The legend grew or shrank -- folding a group, eliding, a new entry.
-
-        updateGeometry() belongs here and *not* in _refit: the plot's grid only
-        re-reads sizeHint when asked, so without it an unfolded group stays at
-        the folded height and scrolls instead of expanding. Keeping it off the
-        resize path stops the two from driving each other in a loop."""
+        updateGeometry() belongs here and *not* in _refit, which would leave the
+        two driving each other in a loop."""
         self.updateGeometry()
         self._refit()
 
@@ -786,8 +721,7 @@ class _LegendViewport(pg.GraphicsWidget):
 
     def wheelEvent(self, ev):
         if self._max_offset() <= 0:
-            # Nothing to scroll: leave the event for the ViewBox to zoom with,
-            # so the wheel behaves the same over the legend as over the plot.
+            # Nothing to scroll: leave the event for the ViewBox, so the wheel behaves as it does over the plot.
             ev.ignore()
             return
         self._offset -= ev.delta() * self.WHEEL_STEP / 120.0
@@ -804,8 +738,7 @@ class _LegendViewport(pg.GraphicsWidget):
         top = (rect.height() - thumb) * (self._offset / max_offset)
         painter.setRenderHint(painter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
-        # Neutral grey at low alpha: legible on the light and dark themes
-        # without picking up either one's accent.
+        # Neutral grey at low alpha: legible on both themes without picking up either one's accent.
         painter.setBrush(pg.mkBrush(128, 128, 128, 120))
         painter.drawRoundedRect(
             QRectF(rect.width() - self.SCROLLBAR_WIDTH, top,
@@ -824,8 +757,7 @@ def _elide_entry(metrics: QFontMetricsF, text: str, budget: float) -> str:
     suffix = separator + tail
     head_budget = budget - metrics.horizontalAdvance(suffix)
     if head_budget <= 0:
-        # No room for the name at all; the set number alone still identifies
-        # the sweep, and the tooltip carries the rest.
+        # No room for the name at all; the set number identifies the sweep and the tooltip carries the rest.
         return tail
     return metrics.elidedText(head, Qt.TextElideMode.ElideMiddle, head_budget) + suffix
 
@@ -850,19 +782,16 @@ def _add_outside_legend(plot_item: pg.PlotItem, **kwargs) -> _OutsideLegend:
     resized."""
     legend = _OutsideLegend(labelTextSize="9pt", **kwargs)
     viewport = _LegendViewport(legend)
-    # The legend, not the viewport: PlotItem.addItem(name=...) registers series
-    # against plot_item.legend, and that has to reach addItem().
+    # The legend, not the viewport: PlotItem.addItem(name=...) registers series against plot_item.legend.
     plot_item.legend = legend
     plot_item.layout.addItem(viewport, 2, 3)
-    # Top-aligned so the legend keeps its content height. Otherwise it stretches
-    # to the plot row and the slack separates each swatch from its label.
+    # Top-aligned so the legend keeps its content height rather than stretching to the plot row.
     plot_item.layout.setAlignment(viewport, Qt.AlignmentFlag.AlignTop)
 
     refitting = False
 
     def rewrap():
-        # Budget against the host widget's height, which nothing here changes,
-        # so the fit converges instead of chasing its own effect.
+        # Budget against the host widget's height, which nothing here changes, so the fit converges.
         nonlocal refitting
         view = plot_item.getViewWidget()
         if view is None or refitting:
@@ -873,14 +802,10 @@ def _add_outside_legend(plot_item: pg.PlotItem, **kwargs) -> _OutsideLegend:
         viewport.set_available_height(view.height() - _plot_chrome_height(plot_item))
         if plot_item.geometry().height() <= view.height() + 1:
             return
-        # GraphicsView only fits its central item on a resize event, so a
-        # PlotItem laid out tall before the wrap would keep that height (bottom
-        # axis clipped) until the pane is resized. Ask for the fit here.
+        # GraphicsView only fits its central item on a resize event, so ask for the fit here.
         refitting = True
         try:
-            # Called unbound, as GraphicsView.resizeEvent does: PlotWidget
-            # shadows setRange with an attribute forwarding to the ViewBox,
-            # whose setRange is a different method.
+            # Called unbound, as GraphicsView.resizeEvent does: PlotWidget shadows setRange with an attribute.
             pg.GraphicsView.setRange(
                 view,
                 QRectF(0, 0, view.width(), view.height()),
@@ -926,32 +851,25 @@ def build_nyquist_plot(
 
     legend = _add_outside_legend(plot_item)
 
-    # addItem(ignoreBounds=True), not PlotItem.addLine, which drops that flag:
-    # an InfiniteLine reports its position from dataBounds, so it would pin the
-    # origin into every range pyqtgraph computes ("A", View All). Negative z
-    # sinks it below the data so the heavy stroke stays off the markers.
+    # addItem(ignoreBounds=True), not PlotItem.addLine, which drops that flag and would pin the origin into every computed range; negative z sinks it below the data.
     for axis_kwargs in ({"pos": 0, "angle": 90}, {"pos": 0, "angle": 0}):
         line = pg.InfiniteLine(pen=pg.mkPen(ORIGIN_COLOR, width=ORIGIN_WIDTH), **axis_kwargs)
         line.setZValue(-1)
         plot_item.addItem(line, ignoreBounds=True)
 
-    # Not seeded with the origin: equal_aspect_limits folds 0 in for
-    # full_range on its own, and kept_range must be free of it entirely.
+    # Not seeded with the origin: equal_aspect_limits folds 0 in for full_range, and kept_range must be free of it.
     interactive_items = []
     kept_xs: List[float] = []
     kept_ys: List[float] = []
     all_xs: List[float] = []
     all_ys: List[float] = []
 
-    # Every sweep's removed points share one "Removed" legend entry, registered
-    # after the loop so it sorts behind every sweep and toggling it hides the
-    # lot (see _LinkedSample). Fits work the same way.
+    # Every sweep's removed points share one "Removed" entry, registered after the loop so it sorts last.
     removed_items: List = []
     fit_items: List = []
     for i, ds in enumerate(datasets):
         color, symbol = _series_style(style_map, ds.key, i)
-        # The tooltip stays fully qualified; the legend entry does not need to
-        # be, because the file name is the group header above it.
+        # The tooltip stays fully qualified; the legend entry need not be, the file name being the group header.
         legend_label = ds.qualified_label if multi_file else ds.label
         if multi_file:
             legend.begin_group(ds.file_id, ds.source_file)
@@ -1026,64 +944,45 @@ def build_bode_plot(
 
     widget = pg.PlotWidget()
     plot_item = widget.getPlotItem()
-    # escape(): the title is appended as markup, so it must be treated as text.
-    # align=center: LabelItem centres the block but left-aligns the lines
-    # inside it, which would push the short subtitle against the left edge.
+    # escape(): the title is appended as markup. align=center: LabelItem left-aligns the lines inside the block.
     plot_item.setTitle(
         f"<div align='center'>{escape(title)}<br>"
         f"<span style='font-size: 9pt'>{escape(BODE_SUBTITLE)}</span></div>"
     )
-    # The align above needs a document width to centre within, and LabelItem
-    # never sets one. Using the widest line centres the subtitle under the
-    # title without letting either wrap.
+    # The align above needs a document width to centre within, and LabelItem never sets one.
     title_doc = plot_item.titleLabel.item.document()
     title_doc.setTextWidth(title_doc.idealWidth())
     plot_item.titleLabel.resizeEvent(None)
-    # setTitle fixes the title row at one line (30px), so the subtitle would
-    # spill over the grid. Overridden here rather than via content margins,
-    # which move the title too and never open a gap beneath it.
+    # setTitle fixes the title row at one line (30px), so the subtitle would spill over the grid.
     plot_item.titleLabel.setMaximumHeight(BODE_TITLE_HEIGHT)
     plot_item.layout.setRowFixedHeight(0, BODE_TITLE_HEIGHT)
-    # Slack so the x-axis title and bare top border axis are not sliced at the
-    # plot edge (as in build_nyquist_plot).
+    # Slack so the x-axis title and bare top border axis are not sliced at the plot edge.
     plot_item.layout.setContentsMargins(1, 6, 1, 12)
     plot_item.showGrid(x=True, y=True, alpha=0.3)
     plot_item.setLabel("bottom", "Frequency [Hz]")
     plot_item.setLabel("left", "|Z| [Ω]")
 
-    # Log scaling is set on the axes, not via PlotItem.setLogMode, which only
-    # transforms the PlotItem's own items -- the phase series lives in a
-    # separate ViewBox. The data is log10'd on the way in, keeping both
-    # ViewBoxes in one coordinate system, and the axes just label decades.
+    # Log scaling is set on the axes, not via PlotItem.setLogMode, which would miss the phase series' separate ViewBox; the data is log10'd on the way in.
     plot_item.getAxis("bottom").setLogMode(True)
     plot_item.getAxis("left").setLogMode(True)
 
-    # The right axis is in use here, so only the top needs a bare border axis
-    # to close the box (see build_nyquist_plot).
+    # The right axis is in use here, so only the top needs a bare border axis to close the box.
     plot_item.showAxis("top")
     top_axis = plot_item.getAxis("top")
     top_axis.setStyle(showValues=False, tickLength=0)
     top_axis.setLabel(None)
 
-    # Pannable and zoomable, like the Nyquist plot. The menu stays off: its
-    # "View All" reframes the magnitude ViewBox alone, which is exactly the
-    # desync follow_magnitude_y below exists to prevent. Auto-Scale on the plot
-    # overlay is the supported way back to the framing.
+    # Pannable and zoomable, like the Nyquist plot; the menu stays off because its "View All" reframes the magnitude ViewBox alone.
     main_view = plot_item.getViewBox()
     main_view.setMouseEnabled(x=True, y=True)
     main_view.setMenuEnabled(False)
-    # Redundant while the ViewBox menu above is off -- kept so re-enabling it
-    # cannot bring "Plot Options" back with it.
+    # Redundant while the ViewBox menu above is off -- kept so re-enabling it cannot bring "Plot Options" back.
     _hide_plot_options_menu(plot_item)
 
     phase_view = pg.ViewBox(enableMenu=False)
-    # Driven through the magnitude view rather than by the mouse directly: x is
-    # linked below, y is carried by follow_magnitude_y.
+    # Driven through the magnitude view rather than the mouse: x is linked below, y carried by follow_magnitude_y.
     phase_view.setMouseEnabled(x=False, y=False)
-    # Below the magnitude ViewBox (at -100): pyqtgraph offers drags in
-    # descending z-order and a ViewBox accepts every one, so an overlay on top
-    # would consume them -- and the magnitude view is the one that must get
-    # them, since it drives both.
+    # Below the magnitude ViewBox (at -100): pyqtgraph offers drags in descending z-order, and the magnitude view is the one that must get them.
     phase_view.setZValue(-200)
     plot_item.scene().addItem(phase_view)
     plot_item.showAxis("right")
@@ -1110,18 +1009,13 @@ def build_bode_plot(
     all_ys: List[float] = []
     phases: List[float] = []
 
-    # As in build_nyquist_plot: the entries are registered after every sweep,
-    # so "Fit" and "Removed" read last in the legend, and each stands for every
-    # series it covers -- here both the magnitude and the phase one.
+    # As in build_nyquist_plot: registered after every sweep, so "Fit" and "Removed" read last and each covers both the magnitude and phase series.
     removed_items: List = []
     fit_items: List = []
     for i, ds in enumerate(datasets):
-        # Shape and color come from style_map as on the Nyquist plot; fill is
-        # what separates magnitude from phase here, so it is overridden below
-        # rather than taken from the map.
+        # Shape and color come from style_map; fill is what separates magnitude from phase, so it is overridden below.
         color, symbol = _series_style(style_map, ds.key, i)
-        # As in build_nyquist_plot: qualified for the tooltip, bare for the
-        # legend entry, with the file name carried by the group header.
+        # As in build_nyquist_plot: qualified for the tooltip, bare for the legend entry.
         legend_label = ds.qualified_label if multi_file else ds.label
         if multi_file:
             legend.begin_group(ds.file_id, ds.source_file)
@@ -1129,10 +1023,9 @@ def build_bode_plot(
         kept_idx, removed_idx = _split_indices(ds)
         Z = ds.impedances  # kept (unmasked) points only
         freq = ds.frequencies
-        x = np.log10(freq)
-        magnitude = np.log10(np.abs(Z))
-        # -phase, matching the Nyquist plot's -Z'': both read "up is more
-        # capacitive".
+        x = _log10(freq)
+        magnitude = _log10(np.abs(Z))
+        # -phase, matching the Nyquist plot's -Z'': both read "up is more capacitive".
         phase = -np.angle(Z, deg=True)
         tip_data = _point_data(
             ds.key, legend_label, freq, kept_idx, Z, values=_bode_tip_values
@@ -1143,10 +1036,7 @@ def build_bode_plot(
             symbol=symbol or DEFAULT_MARKER,
             marker_size=marker_size, line_width=line_width,
         ))
-        # Same tip data on both series, so hovering either marker describes the
-        # whole point. Hollow markers and a dashed line are what separate the
-        # phase series from the magnitude one -- which is why the shapes on
-        # offer (MARKER_SHAPES) are all filled.
+        # Same tip data on both series, so hovering either marker describes the whole point; hollow markers and a dashed line are what separate phase from magnitude.
         interactive_items.append(_add_kept_series(
             phase_view, x, phase, tip_data, None, color, style,
             symbol=symbol or DEFAULT_MARKER, hollow=True,
@@ -1158,11 +1048,10 @@ def build_bode_plot(
 
         if fit_curves is not None and ds.key in fit_curves:
             freq_f, Zf = fit_curves[ds.key]
-            xf = np.log10(freq_f)
-            # Both halves of the fit go on the one legend entry, so hiding it
-            # takes the phase curve with the magnitude one.
+            xf = _log10(freq_f)
+            # Both halves of the fit go on the one legend entry, so hiding it takes both curves.
             fit_items.append(
-                _add_fit_series(plot_item, xf, np.log10(np.abs(Zf)), color, line_width)
+                _add_fit_series(plot_item, xf, _log10(np.abs(Zf)), color, line_width)
             )
             fit_items.append(
                 _add_fit_series(
@@ -1173,17 +1062,14 @@ def build_bode_plot(
         if show_removed:
             Zr = ds.data.get_impedances(masked=True)
             fr = ds.data.get_frequencies(masked=True)
-            xr, magnitude_r = np.log10(fr), np.log10(np.abs(Zr))
+            xr, magnitude_r = _log10(fr), _log10(np.abs(Zr))
             phase_r = -np.angle(Zr, deg=True)
-            # One tip payload for both series, as for the kept points: hovering
-            # either × describes the whole point.
+            # One tip payload for both series, as for the kept points.
             removed_tips = _point_data(
                 ds.key, legend_label, fr, removed_idx, Zr,
                 removed=True, values=_bode_tip_values,
             )
-            # A removed point is missing from *both* halves of the sweep, so it
-            # is marked on both -- the phase series would otherwise read as an
-            # unbroken run through a gap the magnitude series shows.
+            # A removed point is missing from *both* halves of the sweep, so it is marked on both.
             for container, y in ((plot_item, magnitude_r), (phase_view, phase_r)):
                 item = _add_removed_series(
                     container, xr, y, removed_tips, size=marker_size
@@ -1193,8 +1079,7 @@ def build_bode_plot(
                     removed_items.append(item)
             if xr.size:
                 all_xs.extend(xr); all_ys.extend(magnitude_r)
-                # Framed with the kept phases so the × markers land inside the
-                # opening view, matching what full_range does for magnitude.
+                # Framed with the kept phases so the × markers land inside the opening view.
                 phases.extend(phase_r)
 
     legend.end_group()
@@ -1207,8 +1092,7 @@ def build_bode_plot(
     widget.kept_range = _bounds(kept_xs, kept_ys, equal_aspect=False)
     widget.full_range = _bounds(all_xs, all_ys, equal_aspect=False)
     widget.range_key = "bode"
-    # The scene owns the extra ViewBox; hang it off the widget so it is
-    # reachable and its lifetime is tied to the plot.
+    # The scene owns the extra ViewBox; hang it off the widget so it is reachable and lives as long.
     widget.phase_view = phase_view
 
     if widget.full_range is not None:
@@ -1216,14 +1100,16 @@ def build_bode_plot(
         plot_item.setXRange(xlo, xhi, padding=0)
         plot_item.setYRange(ylo, yhi, padding=0)
 
-    # Framed explicitly: autorange recomputes on every item or view change and
-    # would drift the phase curve out of step with the magnitude one.
-    if phases:
-        phase_pad = (max(phases) - min(phases)) * 0.05 or 1.0
-        phase_view.setYRange(min(phases) - phase_pad, max(phases) + phase_pad, padding=0)
+    # Framed explicitly: autorange would drift the phase curve out of step with the magnitude one.
+    # Screened like _bounds does the magnitude axis, and for the same reason: a
+    # NaN impedance has no phase, and one would make this range unsettable.
+    finite_phases = [p for p in phases if math.isfinite(p)]
+    if finite_phases:
+        low, high = min(finite_phases), max(finite_phases)
+        phase_pad = (high - low) * 0.05 or 1.0
+        phase_view.setYRange(low - phase_pad, high + phase_pad, padding=0)
 
-    # Connected last, once both axes are framed, so the opening layout is not
-    # read as a user gesture to be mirrored.
+    # Connected last, once both axes are framed, so the opening layout is not read as a user gesture.
     _follow_magnitude_y(main_view, phase_view)
     return widget
 
@@ -1232,11 +1118,8 @@ def _follow_magnitude_y(main_view: pg.ViewBox, phase_view: pg.ViewBox) -> None:
     """Carry the phase axis along with the magnitude one under pan and zoom.
 
     The two axes are independent -- decades of ohms against degrees -- so x can
-    simply be linked but y cannot. Left alone, dragging would slide the
-    magnitude curve while the phase curve sat still, and the pair would stop
-    lining up. Instead the phase range is re-mapped by whatever affine change
-    the magnitude range just underwent, so every point keeps its position on
-    screen and the two curves move as one.
+    be linked but y cannot. The phase range is instead re-mapped by whatever
+    affine change the magnitude range just underwent, so the two move as one.
     """
     previous = [tuple(main_view.viewRange()[1])]
 
@@ -1259,26 +1142,19 @@ def _follow_magnitude_y(main_view: pg.ViewBox, phase_view: pg.ViewBox) -> None:
 
 class _SymmetricYViewBox(pg.ViewBox):
     """A ViewBox whose wheel zoom is anchored on y = 0 instead of on the cursor.
-
-    pyqtgraph scales about wherever the pointer happens to be, which walks the
-    residual axis off centre -- scroll near the top and you end up with, say,
-    -1% to +6%, so the two limit lines no longer sit a matched distance from
-    the zero line and the figure stops reading as symmetric. Residuals are
-    signed deviations about zero, so the x axis is the one point the scale
-    should always be stretched about.
+    Residuals are signed deviations about zero, so that is the one point the
+    scale should always be stretched about.
     """
 
     def wheelEvent(self, ev, axis=None):
-        # axis=0 is the bottom axis' own wheel handler; x is masked out here
-        # (see build_residuals_plot), so there is nothing for it to scale.
+        # axis=0 is the bottom axis' own wheel handler; x is masked out here, so there is nothing to scale.
         if axis == 0 or not self.state["mouseEnabled"][1]:
             ev.ignore()
             return
 
         s = 1.02 ** (ev.delta() * self.state["wheelScaleFactor"])
         self._resetTarget()
-        # x=None leaves the frequency axis untouched; the centre's x is unused
-        # for the same reason (scaleBy takes the setYRange-only path).
+        # x=None leaves the frequency axis untouched; the centre's x is unused for the same reason.
         self.scaleBy(y=s, center=pg.Point(0.0, 0.0))
         ev.accept()
         self.sigRangeChangedManually.emit([False, True])
@@ -1296,11 +1172,9 @@ def _residual_text(value: float) -> str:
 
 
 def _residual_tip_values(names: Tuple[str, str], re_value, im_value) -> str:
-    """Both parts at one frequency, named for the convention in force.
-
-    Both, not just the hovered series: as on the Bode plot, what you want off a
-    point is the full state at that frequency -- a real part inside the limit
-    means little without the imaginary part beside it."""
+    """Both parts at one frequency, named for the convention in force -- both,
+    not just the hovered series, since a real part inside the limit means little
+    without the imaginary part beside it."""
     return (
         f"{names[0]}: {_residual_text(float(re_value))}\n"
         f"{names[1]}: {_residual_text(float(im_value))}"
@@ -1318,22 +1192,14 @@ def build_residuals_plot(
     """Relative residuals, in percent, of a validation result (Kramers-Kronig
     or Z-HIT) against frequency, log-x.
 
-    `residual_mode` picks what they are relative *to* -- |Z| or each part's own
-    magnitude, see core.validation.RESIDUAL_MODES -- and names the series to
-    match; None takes that module's default. The same convention decides which
-    points were rejected, so the limit lines below mark exactly the points that
-    went.
-
-    `threshold` is the limit points are rejected at outright; `soft_threshold`
-    the advanced mode's inner limit, drawn only when the two differ. They also
-    frame the figure -- the axis runs to the higher of them plus
-    _AXIS_HEADROOM_PERCENT, and residuals past that are pinned to the edge and
-    marked rather than allowed to set the scale.
-
-    `label` names the sweep in a point's metadata box; it falls back to the
-    title, which carries the label plus the method that produced it."""
-    # Deferred, as the module docstring's import note explains. Free here: a
-    # validation result in hand means the analysis stack is already loaded.
+    `residual_mode` picks what they are relative *to* (see
+    core.validation.RESIDUAL_MODES) and names the series to match; None takes
+    that module's default. `threshold` is the limit points are rejected at and
+    `soft_threshold` the advanced mode's inner limit, drawn only when the two
+    differ; both frame the figure, and residuals past it are pinned to the edge
+    and marked. `label` names the sweep in a point's metadata box, falling back
+    to the title."""
+    # Deferred, as the module docstring's import note explains; free here, the analysis stack being loaded already.
     from core.validation import RESIDUAL_BY_MODULUS, relative_residuals
 
     residual_mode = residual_mode or RESIDUAL_BY_MODULUS
@@ -1347,20 +1213,11 @@ def build_residuals_plot(
     _close_plot_box(plot_item)
     legend = _add_outside_legend(plot_item)
 
-    # Plain percent values instead of pyqtgraph's SI-prefix axis scaling, which
-    # would label the axis "0.001" and show values as a multiplier of it.
+    # Plain percent values instead of pyqtgraph's SI-prefix axis scaling.
     plot_item.getAxis("left").enableAutoSIPrefix(False)
     plot_item.getAxis("bottom").enableAutoSIPrefix(False)
 
-    # Y only: the wheel stretches and shrinks the residual scale, and a drag
-    # slides it, but frequency stays put -- panning x would only lose the limit
-    # lines' span or slide the figure off its own data.
-    #
-    # The scale is the one thing here worth adjusting. Framing on the limits
-    # (see _AXIS_HEADROOM_PERCENT) leaves a well-fitted sweep as a near-flat
-    # line across the middle, and stretching y is how you read its shape
-    # without losing the fixed framing everywhere else. _SymmetricYViewBox
-    # keeps that stretch centred on the zero line.
+    # Y only: the wheel and drag rescale and slide the residual scale while frequency stays put, the scale being the one thing here worth adjusting.
     view_box = plot_item.getViewBox()
     view_box.setMouseEnabled(x=False, y=True)
     view_box.setMenuEnabled(False)
@@ -1369,13 +1226,7 @@ def build_residuals_plot(
     res_re = np.asarray(res_re, dtype=float)
     res_im = np.asarray(res_im, dtype=float)
 
-    # The Y range is settled before anything is drawn: which points are
-    # drawable depends on it, and so does where the off-scale markers go.
-    #
-    # This is the opening frame, not a lock -- the wheel rescales y from here
-    # (see setMouseEnabled above). What is pinned off scale stays pinned
-    # though: those points are NaN in the series, so zooming out will not
-    # uncover them. The marker is how you know they are there.
+    # The Y range is settled before anything is drawn: which points are drawable depends on it, and so does where the off-scale markers go.
     levels = [abs(lvl) for lvl in (threshold, soft_threshold) if lvl is not None]
     if levels:
         y_max = max(levels) + _AXIS_HEADROOM_PERCENT
@@ -1386,18 +1237,13 @@ def build_residuals_plot(
         span = float(np.abs(finite).max()) if finite.size else 1.0
         y_max = min(span, _MAX_RESIDUAL_AXIS_PERCENT) * 1.15
 
-    # Anything the axis cannot hold -- infinite, or merely enormous -- is drawn
-    # as NaN so connect="finite" breaks the line there rather than running it
-    # off to nowhere. The markers below say where it went.
+    # Anything the axis cannot hold is drawn as NaN, so connect="finite" breaks the line there.
     drawable = [np.isfinite(v) & (np.abs(v) <= y_max) for v in (res_re, res_im)]
 
     re_name, im_name = _RESIDUAL_SERIES_NAMES[residual_mode]
     re_color, im_color = SERIES_COLORS[0], SERIES_COLORS[1]
 
-    # One payload per plotted point, in the arrays' own order -- the series are
-    # drawn over the whole sweep with NaN in the off-scale slots, so the tips
-    # line up index for index. Note is empty here: a point drawn at its own
-    # value needs no qualifier, and the pinned ones carry theirs below.
+    # One payload per plotted point, in the arrays' own order, so the tips line up index for index.
     tips = [
         {
             "label": label or title or "Residuals",
@@ -1420,16 +1266,13 @@ def build_residuals_plot(
             pen=pg.mkPen(color, width=1.5),
             symbol=symbol, symbolSize=6, symbolBrush=color, symbolPen=None,
             name=name,
-            # Forwarded to the internal ScatterPlotItem (PlotDataItem maps
-            # 'data' straight through); `hoverable` is not on that list, so it
-            # is set below.
+            # Forwarded to the internal ScatterPlotItem; `hoverable` is not on that list, so it is set below.
             data=tips,
         )
         item.scatter.opts["hoverable"] = True
         interactive_items.append(item.scatter)
 
-    # Added before setLogMode below, which skips items lacking setLogMode --
-    # InfiniteLine has none, so it needs no transform of its own.
+    # Added before setLogMode below, which skips items lacking it -- InfiniteLine needs no transform.
     zero_line = pg.InfiniteLine(pos=0, angle=0, pen=pg.mkPen("#999999", width=0.8))
     zero_line.setZValue(-1)
     plot_item.addItem(zero_line, ignoreBounds=True)
@@ -1438,20 +1281,16 @@ def build_residuals_plot(
         x_bounds = [float(freq.min()), float(freq.max())]
 
         def _limit_lines(level: float, color: str, name: str) -> None:
-            # PlotDataItem, not InfiniteLine: the legend swatch painter reads
-            # item.opts unconditionally, which InfiniteLine lacks. The resulting
-            # AttributeError inside a Qt paint() override aborts the process.
+            # PlotDataItem, not InfiniteLine: the legend swatch painter reads item.opts unconditionally, and the AttributeError inside paint() aborts the process.
             pen = pg.mkPen(color, width=1.5, style=Qt.DashLine)
             top = pg.PlotDataItem(x=x_bounds, y=[level, level], pen=pen)
             bottom = pg.PlotDataItem(x=x_bounds, y=[-level, -level], pen=pen)
-            # ignoreBounds: these are folded into y_max above instead, so an
-            # off-scale limit cannot blow out the view.
+            # ignoreBounds: these are folded into y_max above instead.
             plot_item.addItem(top, ignoreBounds=True)
             plot_item.addItem(bottom, ignoreBounds=True)
             legend.addItem(top, f"±{level}% {name}")
 
-        # Named for what they are only when there are two of them -- a lone
-        # limit has no soft one to be the "hard" half of.
+        # Named for what they are only when there are two of them.
         paired = threshold is not None and soft_threshold is not None
         if paired:
             _limit_lines(soft_threshold, "#7fb069", "soft limit")
@@ -1464,13 +1303,10 @@ def build_residuals_plot(
             if not ok:
                 off_x.append(float(x))
                 off_y.append(y_max * 0.97 if value > 0 else -y_max * 0.97)
-                # The marker sits at a made-up y, so its box is the only place
-                # the real number is readable -- hence the note.
+                # The marker sits at a made-up y, so its box is the only place the real number is readable.
                 off_tips.append({**tips[i], "note": "off scale"})
     if off_x:
-        # Pinned inside the edge, unfilled, so a point too large to draw is
-        # visibly *there* -- it was rejected, and a gap in the line would
-        # otherwise read as missing data.
+        # Pinned inside the edge, unfilled, so a point too large to draw is visibly *there*.
         off_scale = pg.PlotDataItem(
             x=off_x, y=off_y, pen=None,
             symbol="t1", symbolSize=11, symbolBrush=None,
@@ -1480,16 +1316,13 @@ def build_residuals_plot(
         )
         off_scale.scatter.opts["hoverable"] = True
         interactive_items.append(off_scale.scatter)
-        # A named item is added to the legend by addItem itself, unlike the
-        # limit lines above, whose labels are built from their levels.
+        # A named item is added to the legend by addItem itself, unlike the limit lines above.
         plot_item.addItem(off_scale, ignoreBounds=True)
 
-    # Read by the hosting pane to wire up the metadata boxes, as on the
-    # Nyquist and Bode plots.
+    # Read by the hosting pane to wire up the metadata boxes, as on the Nyquist and Bode plots.
     widget.interactive_items = interactive_items
 
-    # Must precede the fixed Y range below: updateLogMode re-triggers its own
-    # autorange, which would clobber an earlier setYRange.
+    # Must precede the fixed Y range below: updateLogMode re-triggers its own autorange.
     plot_item.setLogMode(x=True, y=False)
     plot_item.setYRange(-y_max, y_max, padding=0)
 
@@ -1511,12 +1344,9 @@ def _drt_x_values(tau):
 
 
 def _collect_drt_bounds(xs: List[float], ys: List[float], x, y) -> None:
-    """Fold one drawn curve into the running range.
-
-    The x values go in as decades: _drt_x_axis puts the plot in log mode, which
-    leaves the series carrying raw frequencies while the ViewBox works in log10
-    of them -- so a range built from the raw values would land the view nowhere
-    near the curve.
+    """Fold one drawn curve into the running range. The x values go in as
+    decades: the plot is in log mode, so the ViewBox works in log10 while the
+    series carry raw frequencies.
     """
     x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -1538,12 +1368,8 @@ def _set_drt_range(widget, xs: List[float], ys: List[float]) -> None:
 
 def credible_intervals(result):
     """(freq, mean, lower, upper) for a DRT result carrying Bayesian credible
-    intervals, or None for one that does not.
-
-    Only a Bayesian run has them. pyimpspec leaves the three arrays empty
-    otherwise and get_drt_credible_intervals_data() then hands back four empty
-    arrays, which is the "nothing to draw" case here -- as is a result class
-    that has no such method at all."""
+    intervals, or None for one that does not -- including a result class with no
+    such method at all."""
     getter = getattr(result, "get_drt_credible_intervals_data", None)
     if getter is None:
         return None
@@ -1556,33 +1382,24 @@ def credible_intervals(result):
 def _add_credible_band(plot_item, freq, lower, upper, color) -> None:
     """Shade between the credible interval's bounds, under the curves.
 
-    The two edges are plotted rather than passed straight to FillBetweenItem
-    because the fill tracks its curves in *plotted* coordinates: this axis is
-    logarithmic, and only an item the PlotItem owns gets told so. They are
-    drawn faintly rather than hidden, so the envelope still reads at a glance
-    where the fill is too pale to see -- over a light peak, say.
-
-    Added after the log mode is set (see build_drt_plot), so the fill's first
-    path is built from edges already mapped into decades."""
+    The two edges are plotted rather than passed straight to FillBetweenItem,
+    which tracks its curves in *plotted* coordinates on this logarithmic axis,
+    and are added after the log mode is set (see build_drt_plot).
+    """
     edges = [
         plot_item.plot(freq, bound, pen=pg.mkPen(_with_alpha(color, 110), width=1.0))
         for bound in (lower, upper)
     ]
     band = pg.FillBetweenItem(*edges, brush=pg.mkBrush(_with_alpha(color, 45)))
-    # Behind the curves: FillBetweenItem sinks itself below its own edges, and
-    # those sit at the default depth alongside every other series.
+    # Behind the curves: FillBetweenItem sinks itself below its own edges.
     plot_item.addItem(band, ignoreBounds=True)
 
 
 def build_drt_plot(results: List[Tuple[str, object]], title: str = "DRT") -> pg.PlotWidget:
     """Gamma vs frequency for one or more (label, result) pairs, log-x, high
-    frequency on the left.
-
-    A Bayesian run carries credible intervals as well as the distribution
-    itself; those are drawn as a shaded band around a dashed posterior mean, in
-    the sweep's own colour. It is the only thing that run produces beyond what
-    a plain TR-RBF run does, and it takes minutes to hours to get, so it is
-    always drawn when it is there."""
+    frequency on the left. A Bayesian run's credible intervals are drawn as a
+    shaded band around a dashed posterior mean, in the sweep's own colour.
+    """
     if not results:
         raise ValueError("No DRT results provided to plot.")
 
@@ -1594,14 +1411,10 @@ def build_drt_plot(results: List[Tuple[str, object]], title: str = "DRT") -> pg.
     _hide_plot_options_menu(plot_item)
     _add_outside_legend(plot_item)
 
-    # Before anything is plotted, unlike the other builders: PlotItem.addItem
-    # puts each new item into the mode the axis is already in, which is what
-    # lets the credible band be filled between two curves in plotted
-    # coordinates rather than raw hertz.
+    # Before anything is plotted, unlike the other builders: PlotItem.addItem puts each new item into the mode the axis is already in.
     _drt_x_axis(plot_item)
 
-    # What the Auto-Scale button frames (see PgFigurePane._autoscale). A DRT
-    # curve has no removed points, so the kept and full spans are the same one.
+    # What the Auto-Scale button frames; a DRT curve has no removed points, so kept and full match.
     xs: List[float] = []
     ys: List[float] = []
 
@@ -1622,8 +1435,7 @@ def build_drt_plot(results: List[Tuple[str, object]], title: str = "DRT") -> pg.
             pen=pg.mkPen(color, width=1.2, style=Qt.DashLine),
             name=f"{label} ({CREDIBLE_INTERVAL_NAME})",
         )
-        # The band frames the plot too: it is wider than the curve by
-        # construction, and cropping the uncertainty would defeat drawing it.
+        # The band frames the plot too: it is wider than the curve by construction.
         _collect_drt_bounds(xs, ys, band_freq, lower)
         _collect_drt_bounds(xs, ys, band_freq, upper)
 
@@ -1669,8 +1481,7 @@ def build_drt_peaks_plot(
                     pen=pg.mkPen(color, width=1.0, style=Qt.DashLine),
                 )
 
-        # Only the summed curve is framed: an individual peak sits under it by
-        # construction, so it can add nothing to the range.
+        # Only the summed curve is framed: an individual peak sits under it by construction.
         gammas = peaks.get_gammas(num_per_decade=num_per_decade)
         plot_item.plot(
             freq,

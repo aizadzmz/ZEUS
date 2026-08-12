@@ -17,8 +17,7 @@ from core.io_utils import EISDataset
 from core.session import SCHEMA_VERSION, load_session, save_session
 
 # --- Synthetic spectrum: R0 + two parallel RC elements (tau = 5 ms, 300 ms) ---
-# R(RC)(RC) is the *true* model here, so a fit of it must recover R0=10,
-# R1=50, R2=30 and must beat any simpler circuit.
+# R(RC)(RC) is the *true* model here, so a fit of it must recover R0=10, R1=50, R2=30 and beat any simpler circuit.
 R0_TRUE, R1_TRUE, R2_TRUE = 10.0, 50.0, 30.0
 rng = np.random.default_rng(42)
 f = np.logspace(5, -1, 40)
@@ -52,14 +51,12 @@ for bad in ("R(RC", "R(XY)", "", "   "):
     assert not ok, f"{bad!r} should not validate (got {message!r})"
 print("CDC validation OK (accepts valid, rejects malformed/unknown/empty)")
 
-# Typing differences must collapse to one cache key, or the "same" circuit
-# fitted twice produces two entries.
+# Typing differences must collapse to one cache key, or the "same" circuit fitted twice produces two entries.
 assert canonical_cdc("R(RC)") == canonical_cdc("R( RC )") == canonical_cdc("[R(RC)]")
 assert canonical_cdc("R(RC)") != canonical_cdc("R(RC)(RC)")
 print("CDC canonicalization OK, R(RC) ->", canonical_cdc("R(RC)"))
 
-# Every shipped preset must parse: they populate a dropdown, so a typo is a
-# dead menu entry.
+# Every shipped preset must parse: they populate a dropdown, so a typo is a dead menu entry.
 for name, cdc in CIRCUIT_PRESETS:
     ok, message = validate_cdc(cdc)
     assert ok, f"preset {name!r} ({cdc}) does not parse: {message}"
@@ -77,8 +74,7 @@ print(
     f"(chi2 = {result.pseudo_chisqr:.2e})",
 )
 
-# The default method is chosen specifically so error bars exist -- see
-# core.ecm.run_ecm_fit. A NaN here means that default regressed.
+# The default method is chosen specifically so error bars exist; a NaN here means that default regressed.
 errors = [p.stderr for params in result.parameters.values() for p in params.values()]
 assert all(e == e for e in errors), f"expected finite error bars, got {errors}"
 print("all parameters have finite error bars OK, max =", f"{max(errors):.4g}%")
@@ -93,8 +89,7 @@ dataset_b = EISDataset(
 seeded_cdc = seed_cdc(TRUE_CDC, result)
 assert seeded_cdc != TRUE_CDC, "seeding should rewrite the CDC with fitted values"
 assert canonical_cdc(seeded_cdc) == canonical_cdc(TRUE_CDC), "topology must not change"
-# A previous fit of a different circuit is not seedable and must be ignored,
-# not mismatched element-by-element.
+# A previous fit of a different circuit is not seedable and must be ignored, not mismatched element-by-element.
 assert seed_cdc("R(RC)", result) == "R(RC)"
 assert seed_cdc(TRUE_CDC, None) == TRUE_CDC
 print("seed_cdc OK (rewrites values, preserves topology, falls back on mismatch)")
@@ -109,8 +104,7 @@ print(
 )
 
 # --- Two circuits fitted to one sweep both survive ---
-# The cache is keyed by (circuit, sweep), so a second circuit must not evict
-# the first.
+# The cache is keyed by (circuit, sweep), so a second circuit must not evict the first.
 simple = run_ecm_fit(dataset, "R(RC)")
 ecm_results = {
     (canonical_cdc("R(RC)"), dataset.key): simple,
@@ -134,8 +128,7 @@ assert "Akaike info. criterion" in report  # statistics dataframe
 print("format_fit_report OK")
 
 # --- Building a circuit from DRT peaks ---
-# The DRT supplies what an ECM cannot infer: how many processes there are.
-# On this spectrum the answer is two.
+# The DRT supplies what an ECM cannot infer -- how many processes there are; on this spectrum, two.
 peaks = analyze_drt_peaks(run_drt(dataset))
 r_series = series_resistance(dataset)
 assert np.isclose(r_series, R0_TRUE, rtol=0.02), r_series
@@ -151,8 +144,7 @@ print(
     f"{canonical_cdc(generated)}"
 )
 
-# Keeping every peak must produce a pair per peak -- i.e. the trimming above
-# is the threshold doing its job, not the peak count being small.
+# Keeping every peak must produce a pair per peak, i.e. the trimming above is the threshold doing its job.
 kept_all = circuit_from_drt_peaks(peaks, r_series, min_area_fraction=0.0)
 assert canonical_cdc(kept_all).count("(") == peaks.get_num_peaks()
 print("min_area_fraction OK: 0.0 keeps all", peaks.get_num_peaks(), "peaks")
@@ -161,9 +153,7 @@ print("min_area_fraction OK: 0.0 keeps all", peaks.get_num_peaks(), "peaks")
 generated_c = circuit_from_drt_peaks(peaks, r_series, use_cpe=False)
 assert canonical_cdc(generated_c) == "[R(RC)(RC)]", canonical_cdc(generated_c)
 
-# What matters is that the generated starting point actually fits: both
-# variants must recover the ground truth, from values the DRT supplied rather
-# than from pyimpspec's generic defaults.
+# What matters is that the generated starting point actually fits: both variants must recover the ground truth from values the DRT supplied.
 for label, cdc in (("R(RQ)(RQ)", generated), ("R(RC)(RC)", generated_c)):
     generated_fit = run_ecm_fit(dataset, cdc)
     assert np.allclose(resistances(generated_fit), expected, rtol=0.02), (
@@ -209,21 +199,18 @@ assert restored.method == result.method and restored.weight == result.weight
 assert np.allclose(restored.frequencies, result.frequencies)
 assert np.allclose(restored.impedances, result.impedances)
 assert np.allclose(restored.residuals, result.residuals)
-# The fitted values travel with the topology, so the restored circuit
-# reproduces the curve rather than just its shape.
+# The fitted values travel with the topology, so the restored circuit reproduces the curve rather than just its shape.
 assert np.allclose(
     restored.get_impedances(num_per_decade=20),
     result.get_impedances(num_per_decade=20),
 )
-# Error bars and the lmfit-derived statistics must survive too -- both are
-# reconstructed by hand, so this is what proves the stand-in works.
+# Error bars and the lmfit-derived statistics must survive too -- both are reconstructed by hand, so this proves the stand-in works.
 restored_errors = [p.stderr for params in restored.parameters.values() for p in params.values()]
 assert np.allclose(sorted(restored_errors), sorted(errors))
 assert "Akaike info. criterion" in format_fit_report(restored, "Set 01")
 print("ECM session round-trip OK (values, errors, statistics, curve)")
 
-# A saved session with no fits must still load, and old sessions predate the
-# ecm_results block entirely.
+# A saved session with no fits must still load, and old sessions predate the ecm_results block entirely.
 path_empty = "test/data/_session_ecm_empty_tmp.eisz"
 save_session(path_empty, [dataset], {}, {}, {})
 assert load_session(path_empty)[7] == {}

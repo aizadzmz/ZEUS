@@ -2,9 +2,8 @@
 
 Run after changing the logo: python installer/make_wizard_images.py
 
-Inno picks one file per set by matching the display's DPI scaling, so each set
-ships at several sizes. BMP rather than PNG: PNG only works on Inno 6.3+, and
-BMP is understood by every version.
+Each set ships at several sizes, Inno picking one by the display's DPI
+scaling. BMP rather than PNG, which only works on Inno 6.3+.
 """
 
 from pathlib import Path
@@ -15,11 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "gui" / "assets"
 OUT = Path(__file__).resolve().parent
 
-# The splash card colour from gui/app.py (SPLASH_BG), so the installer and the
-# app that follows it share a background. Keep the two in step.
+# The splash card colour from gui/app.py (SPLASH_BG), so the installer and the app that follows share a background; keep the two in step.
 DARK = (21, 24, 29)
-# The small image sits in the wizard's page header, which is white under
-# WizardStyle=modern.
+# The small image sits in the wizard's page header, which is white under WizardStyle=modern.
 LIGHT = (255, 255, 255)
 
 # Inno's standard scaled sizes for each slot.
@@ -40,8 +37,7 @@ def compose(logo: Image.Image, size: tuple[int, int], bg, margin: float):
 
     canvas = Image.new("RGB", size, bg)
     scaled = logo.resize((box_w, scaled_h), Image.LANCZOS)
-    # Composited through its own alpha so the transparent border does not
-    # darken the background.
+    # Composited through its own alpha so the transparent border does not darken the background.
     canvas.paste(scaled, ((width - box_w) // 2, (height - scaled_h) // 2), scaled)
     return canvas
 

@@ -2,10 +2,7 @@
 sweep and removing the fitted element's own impedance.
 
 Distinct from the inductive filter it sits beside, which masks points. This
-one rewrites them, so the tests below care about three things the masking
-filter never has to: that the arithmetic recovers the rest of the circuit,
-that the sweep it was asked about is left alone, and that a topology where the
-subtraction would be meaningless is refused rather than approximated.
+one rewrites them.
 """
 import os
 
@@ -60,9 +57,7 @@ def _sweep(cdc: str, frequencies=FREQUENCIES) -> EISDataset:
     return EISDataset(simulate_spectrum(parse_cdc(cdc), frequencies), 0, "sim")
 
 
-# A cell whose two time constants (1e-4 s, 1e-2 s) both sit inside a
-# 0.1 Hz - 100 kHz window, so both arcs are actually resolvable, plus a
-# Warburg tail of comparable size to the arcs.
+# A cell whose two time constants (1e-4 s, 1e-2 s) both sit inside a 0.1 Hz - 100 kHz window, plus a Warburg tail of comparable size to the arcs.
 _TWO_ARC_CELL = (
     "R{R=0.005}(R{R=0.002}Q{Y=0.199,n=0.85})(R{R=0.003}Q{Y=5.28,n=0.9})W{Y=548}"
 )
@@ -95,13 +90,10 @@ def test_subtraction_leaves_the_rest_of_the_circuit(name, cell, subtraction, rem
 
 
 def test_seeding_is_what_makes_the_fit_land():
-    """Regression on the reason _fit_diffusion_circuit exists at all.
-
-    From pyimpspec's default initial values (Ws starts at Y=1, B=1) the fit
-    converges on Y~1e5 -- a tail nobody measured, subtracted from data that
-    still looks like data afterwards. Asserted against the true parameters
-    rather than against chi-squared, because the bad fit reports a converged
-    result too; only the values give it away.
+    """Regression on the reason _fit_diffusion_circuit exists at all: from
+    pyimpspec's default initial values (Ws starts at Y=1, B=1) the fit
+    converges on Y~1e5, a tail nobody measured. Asserted against the true
+    parameters rather than chi-squared, which the bad fit also satisfies.
     """
     _, cell, subtraction, _ = CASES[0]
     _, result = diffusion_subtracted(_sweep(cell), subtraction)
@@ -238,11 +230,7 @@ def test_fixed_parameters_are_left_out_of_the_description():
 
 
 # --- measured data, which is where the synthetic cases were not enough ------
-#
-# Every test above passes a spectrum that is exactly the subtraction circuit
-# plus noise. A real cell is not: this one spends its first 12 points above the
-# real axis on cabling inductance, and both bugs the synthetic cases missed
-# lived there.
+# Every test above passes a spectrum that is the subtraction circuit plus noise; a real cell is not, and both bugs the synthetic cases missed lived in this one's first 12 inductive points.
 
 MEASURED = "test/data/example_EIS_data.txt"
 
@@ -255,12 +243,10 @@ def measured():
 
 
 def test_ohmic_resistance_is_the_axis_crossing_not_the_first_point(measured):
-    """The bug that made the first version useless on real data.
-
-    Re(Z) at the highest frequency is the inductive tail's, not the cell's,
-    and seeding R_s from it drove the polarisation resistance negative and the
-    Warburg to Y=1.6e13 -- a fit so far off that the impedance it subtracted
-    was indistinguishable from zero.
+    """The bug that made the first version useless on real data: Re(Z) at the
+    highest frequency is the inductive tail's, not the cell's, and seeding R_s
+    from it drove the polarisation resistance negative and the Warburg to
+    Y=1.6e13.
     """
     from core.filtering import _ohmic_resistance
 
@@ -271,11 +257,7 @@ def test_ohmic_resistance_is_the_axis_crossing_not_the_first_point(measured):
 
     assert (imag > 0).any(), "fixture is meant to have an inductive tail"
 
-    # Between the two points that straddle the axis. Asserted as a bracket
-    # rather than as "below the first point": which side of the crossing the
-    # inductive branch runs is the cell's business -- this fixture sweeps left
-    # of it, the demo cells sweep right -- and the estimator is about landing
-    # on the crossing, not about a direction.
+    # Between the two points that straddle the axis, asserted as a bracket rather than "below the first point": which side the inductive branch runs is the cell's business.
     i = np.flatnonzero(np.sign(imag[:-1]) * np.sign(imag[1:]) < 0)[0]
     assert min(real[i], real[i + 1]) <= ohmic <= max(real[i], real[i + 1])
     # And materially away from the point the old estimator returned.
@@ -351,19 +333,13 @@ def test_a_sweep_with_too_few_fittable_points_is_refused(measured):
 
 
 # --- putting the tail back into the ECM model -------------------------------
-#
-# A DRT computed on a subtracted sweep yields a circuit with no diffusion
-# element, and the ECM step fits the sweep as measured, tail included. These
-# pin down why that gap has to be closed in the model rather than in the data.
+# A DRT computed on a subtracted sweep yields a circuit with no diffusion element, while the ECM step fits the sweep as measured, tail included.
 
 
 def test_a_diffusion_free_circuit_fitted_to_a_tailed_sweep_is_badly_wrong():
-    """The failure that pseudo chi-squared does not show.
-
-    Two resolvable arcs plus a Warburg, fitted with a circuit that has no
-    Warburg: the R-CPE pairs absorb the tail because nothing else can, and the
-    resistances come out by tens of percent while chi-squared stays at a value
-    that reads as a perfectly good fit.
+    """The failure that pseudo chi-squared does not show: two resolvable arcs
+    plus a Warburg, fitted with a circuit that has no Warburg, so the R-CPE
+    pairs absorb the tail and the resistances come out by tens of percent.
     """
     from pyimpspec import Resistor
 
@@ -600,19 +576,14 @@ def test_the_model_row_greys_out_with_the_filter(window):
 
 def _run_drt_through_the_window(window):
     """Drive a DRT the way the Run button does, so the per-sweep diffusion fit
-    is recorded the way _on_drt_worker_result records it.
-
-    Goes through _start_drt_run rather than repeating its steps here. That is
-    where the batch's diffusion fits are frozen, and a helper that rebuilt the
-    sequence by hand would go on passing if the freeze were dropped -- which
-    is the failure test_diffusion_record covers.
+    is recorded the way _on_drt_worker_result records it. Goes through
+    _start_drt_run, which is where the batch's diffusion fits are frozen.
     """
     from core.drt import analyze_drt_peaks, run_drt
     from gui.workers import DRTWorker
 
     selected = window._selected_datasets()
-    # The thread would only move run_drt off the UI thread. Results are
-    # delivered below instead: synchronously, and in a known order.
+    # The thread would only move run_drt off the UI thread; results are delivered below instead, synchronously and in a known order.
     start = DRTWorker.start
     DRTWorker.start = lambda self: None
     try:

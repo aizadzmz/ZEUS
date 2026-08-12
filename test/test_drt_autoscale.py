@@ -1,10 +1,8 @@
 """Auto-Scale works on the DRT panes.
 
 The button is on every PgFigurePane, but the framing it reads is set per
-builder -- and the DRT builders did not set it, so clicking Auto-Scale on a DRT
-plot raised AttributeError out of PlotWidget.__getattr__ and took the window
-down. These plots are also in log mode, so their range is in decades while the
-series carry raw frequencies.
+builder -- and the DRT builders did not set it. These plots are also in log
+mode, so their range is in decades while the series carry raw frequencies.
 """
 import os
 

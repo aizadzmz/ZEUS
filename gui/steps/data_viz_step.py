@@ -64,9 +64,7 @@ class DataVizStep(StepPage):
             "which sweeps an analysis runs over — that is the checklist under "
             "the plot — nor how the other steps draw them.",
         )
-        # Both rows hold a segmented control, and the wider of the two would
-        # otherwise trip group_form's WrapLongRows and drop its control onto a
-        # line of its own, leaving the two rows looking unrelated.
+        # Both rows hold a segmented control, and the wider would otherwise trip group_form's WrapLongRows and drop its control onto a line of its own.
         plot_form.setRowWrapPolicy(QFormLayout.DontWrapRows)
         plot_form.addRow("Display", self.display_mode_control())
 
@@ -75,8 +73,7 @@ class DataVizStep(StepPage):
         self.line_radio = marker_style.button(1)
         plot_form.addRow("Style", marker_style)
 
-        # A popup rather than rows here: the marker list is per loaded file, so
-        # it cannot be laid out until the files are known.
+        # A popup rather than rows here: the marker list is per loaded file, so it cannot be laid out until the files are known.
         self.marker_style_button = QPushButton("Marker & line style…")
         self.marker_style_button.setProperty("variant", "secondary")
         self.marker_style_button.setToolTip(
@@ -93,8 +90,7 @@ class DataVizStep(StepPage):
             "Point counts for the selected sweeps, and which of them have "
             "been validated or fitted."
         )
-        # Capped so it cannot grow with the selection and push the panel
-        # off-screen; it keeps its own scrollbar.
+        # Capped so it cannot grow with the selection and push the panel off-screen; it keeps its own scrollbar.
         self.details_text.setMaximumHeight(style.TEXT_PANE_MAX_HEIGHT)
         details_layout.addWidget(self.details_text)
         self.add_settings(details_box)
@@ -109,8 +105,7 @@ class DataVizStep(StepPage):
         header.addWidget(QLabel("Plot"))
 
         view = SegmentedControl(["Nyquist", "Bode"])
-        # Named *_radio though they are QToolButtons: same QAbstractButton
-        # API, and MainWindow._wire_steps reaches them by these names.
+        # Named *_radio though they are QToolButtons: same QAbstractButton API, and MainWindow._wire_steps reaches them by these names.
         self.nyquist_view_radio = view.button(0)
         self.nyquist_view_radio.setToolTip("-Z'' against Z', on equal-aspect axes.")
         self.bode_view_radio = view.button(1)

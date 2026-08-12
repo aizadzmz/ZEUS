@@ -11,8 +11,7 @@ from core.circuit_diagram import (
 from core.ecm import CIRCUIT_PRESETS, run_ecm_fit
 from core.io_utils import EISDataset
 
-# Same synthetic spectrum as test_ecm.py: R0 + two parallel RC pairs, so the
-# values annotated on the schematic below have a known right answer.
+# Same synthetic spectrum as test_ecm.py: R0 + two parallel RC pairs, so the annotated values have a known right answer.
 R0_TRUE, R1_TRUE, R2_TRUE = 10.0, 50.0, 30.0
 f = np.logspace(5, -1, 40)
 w = 2 * np.pi * f
@@ -40,25 +39,21 @@ assert format_quantity(0.0, "ohm") == "0 Ω"
 # Dimensionless quantities (the CPE exponent) keep their plain spelling.
 assert format_quantity(0.9012, "") == "0.9012"
 assert format_quantity(float("nan"), "ohm") == "—"
-# Past the last prefix the mantissa may leave 1-999 rather than the unit
-# losing its meaning.
+# Past the last prefix the mantissa may leave 1-999 rather than the unit losing its meaning.
 assert format_quantity(1e-18, "F").endswith(" fF"), format_quantity(1e-18, "F")
 print("format_quantity OK")
 
 
 # --- Every shipped preset draws ---
-# The tab previews whichever preset is picked, so an element the drawing code
-# cannot place is a crash on selection.
+# The tab previews whichever preset is picked, so an element the drawing code cannot place is a crash on selection.
 for name, cdc in CIRCUIT_PRESETS:
     svg = build_preview_diagram(cdc)
     assert svg.startswith(b"<svg"), name
-    # Every element is named. Unmapped ones (Warburg, Gerischer) fall back to
-    # a box, where the name is the only thing identifying it.
+    # Every element is named; unmapped ones (Warburg, Gerischer) fall back to a box, where the name is all that identifies it.
     assert len(labels(svg)) >= cdc.count("R"), name
 print(f"all {len(CIRCUIT_PRESETS)} presets draw OK")
 
-# A half-typed code must raise, not draw silently as an empty circuit; the
-# GUI's live validation catches it.
+# A half-typed code must raise, not draw silently as an empty circuit.
 try:
     build_preview_diagram("R(RC")
 except Exception:
@@ -66,8 +61,7 @@ except Exception:
 else:
     raise AssertionError("malformed CDC should not produce a diagram")
 
-# Unfitted circuits are annotated with their initial values, which is what
-# makes the preview useful for a circuit built from DRT peaks.
+# Unfitted circuits are annotated with their initial values, which is what makes the preview useful.
 preview = labels(build_preview_diagram("R{R=12.5}(RC)"))
 assert "12.5 Ω" in preview, preview
 print("preview draws initial values OK")
@@ -82,8 +76,7 @@ text = labels(svg)
 assert "R₁" in text and "Q₁" in text, text
 assert not any("_" in label for label in text), text
 
-# The fitted resistances are on the drawing, in the same order the circuit
-# puts them, and carry an error bar each.
+# The fitted resistances are on the drawing, in the circuit's own order, each with an error bar.
 resistances = [label for label in text if label.endswith("%") and "Ω" in label]
 assert len(resistances) == 3, text
 for label, expected in zip(resistances, (R0_TRUE, R1_TRUE, R2_TRUE)):
@@ -91,22 +84,18 @@ for label, expected in zip(resistances, (R0_TRUE, R1_TRUE, R2_TRUE)):
     assert abs(value - expected) / expected < 0.02, (label, expected)
 print("fitted values annotate their components OK:", resistances)
 
-# A two-parameter element gets one <text> per parameter. They used to share
-# one multi-line label, whose <tspan dy=...> line breaks Qt's SVG renderer
-# ignores -- printing Y and n on top of each other.
+# A two-parameter element gets one <text> per parameter; one shared multi-line label printed Y and n on top of each other, Qt ignoring its <tspan dy=...> breaks.
 assert any(label.startswith("Y = ") for label in text), text
 assert any(label.startswith("n = ") for label in text), text
 print("multi-parameter elements stack one line per parameter OK")
 
-# Qt implements SVG 1.2 Tiny, which has no dominant-baseline: if schemdraw
-# emits it, every label lands a line-height from where it belongs.
+# Qt implements SVG 1.2 Tiny, which has no dominant-baseline: if schemdraw emits it, every label lands a line-height off.
 assert b"dominant-baseline" not in svg
 print("SVG is Qt-compatible OK (no dominant-baseline)")
 
 
 # --- Nothing is drawn outside the canvas ---
-# The bounding box schemdraw computes underestimates label extents, which
-# used to clip the top row of element names off the image entirely.
+# The bounding box schemdraw computes underestimates label extents, which used to clip the top row of element names off the image.
 def assert_labels_inside(svg: bytes, what: str) -> None:
     document = svg.decode("utf-8")
     x0, y0, width, height = (float(v) for v in VIEWBOX.search(document).groups())

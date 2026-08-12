@@ -3,13 +3,7 @@
 That record is what "Build circuit from DRT" reads to put the fitted element
 back into the model, and getting it wrong is silent in both directions: a
 missing element leaves the R-CPE pairs absorbing a tail that is still in the
-data, and a spurious one subtracts a tail twice. Neither shows up in the
-pseudo chi-squared -- see core.filtering.diffusion_element_cdc -- so the
-bookkeeping has to be right on its own.
-
-The two failures covered here both came from reading _diffusion_shown, which
-is rebuilt by every redraw for whatever is on screen, as though it described
-the batch. It does not: a run outlives any one draw.
+data, and a spurious one subtracts a tail twice.
 """
 import os
 
@@ -32,14 +26,10 @@ ELEMENT_CDC = "W{Y=0.05}"
 
 
 class _StubFit:
-    """Stands in for a FitResult. The fitting itself is covered by
-    test_diffusion_subtraction; what is under test here is the bookkeeping,
-    and a real CNLS fit per sweep would cost the suite minutes.
-
-    Carries a real parsed circuit rather than a placeholder, because the
-    readout under the checkbox renders it through
-    core.filtering.describe_diffusion_fit on every redraw -- so a draw is part
-    of what these tests exercise, not something they can stub past."""
+    """Stands in for a FitResult; the fitting itself is covered by
+    test_diffusion_subtraction, and a real CNLS fit per sweep would cost the
+    suite minutes. Carries a real parsed circuit, because the readout renders it
+    through core.filtering.describe_diffusion_fit on every redraw."""
 
     pseudo_chisqr = 0.01
 
@@ -59,17 +49,14 @@ def window(app, monkeypatch):
     from gui.main_window import MainWindow
     from gui.workers import DRTWorker
 
-    # Stubbed at the seam core.filtering exposes, so main_window's own
-    # function-local imports pick it up.
+    # Stubbed at the seam core.filtering exposes, so main_window's function-local imports pick it up.
     monkeypatch.setattr(
         filtering,
         "diffusion_impedance",
         lambda ds, cdc, **kw: (np.zeros(len(f), dtype=complex), _StubFit()),
     )
     monkeypatch.setattr(filtering, "diffusion_element_cdc", lambda fit: ELEMENT_CDC)
-    # The worker is never wanted here: results are delivered by calling
-    # _on_drt_worker_result directly, which is what the thread does, and
-    # leaves the test free of thread timing.
+    # The worker is never wanted here: results are delivered by calling _on_drt_worker_result directly, which leaves the test free of thread timing.
     monkeypatch.setattr(DRTWorker, "start", lambda self: None)
 
     window = MainWindow()
@@ -173,9 +160,7 @@ def test_the_drt_filters_survive_a_session_round_trip(window, tmp_path, monkeypa
     an unfiltered spectrum under a DRT curve computed from a filtered one."""
     from PySide6.QtWidgets import QFileDialog
 
-    # Save and load are reached only through their file dialogs; answering
-    # those is what drives the real _save_session/_load_session paths, rather
-    # than a seam added to production code for the test's convenience.
+    # Save and load are reached only through their file dialogs; answering those drives the real paths rather than a seam added for the test's convenience.
     path = str(tmp_path / "s.eisz")
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (path, ""))
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: (path, ""))
@@ -196,8 +181,7 @@ def test_the_drt_filters_survive_a_session_round_trip(window, tmp_path, monkeypa
     assert window.drt_step.remove_inductive_check.isChecked()
     assert window.drt_step.subtract_diffusion_check.isChecked()
     assert window.drt_step.diffusion_cdc_combo.currentData() == "R(RQ)Ws"
-    # The combo is only meaningful with the filter on, and the signal that
-    # normally re-enables its row was blocked through the restore.
+    # The combo is only meaningful with the filter on, and the signal that re-enables its row was blocked through the restore.
     assert window.drt_step.diffusion_cdc_combo.isEnabled()
 
 
@@ -210,8 +194,7 @@ def test_build_from_drt_appends_the_element_after_paging(window):
     window._selection.step_cursor(1)
     _deliver_all(window)
 
-    # Peaks are what _build_circuit_from_drt keys off; a real DRT is not
-    # needed to check that the tail is put back on the end.
+    # Peaks are what _build_circuit_from_drt keys off; a real DRT is not needed to check the tail is put back on the end.
     from core.drt import run_drt
 
     result = run_drt(window._datasets[0])

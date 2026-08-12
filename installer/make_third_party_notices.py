@@ -3,9 +3,6 @@
 Run after a build, before shipping:
     pyinstaller zeus.spec
     python installer/make_third_party_notices.py
-
-Reads build/zeus/PYZ-00.toc rather than the venv, so excluded packages are not
-listed and the notice matches the binary that goes out the door.
 """
 
 import importlib.metadata as md
@@ -41,17 +38,14 @@ def bundled_top_level() -> set[str]:
 
 
 def is_bundled(dist: str, present: set[str], name_to_dists) -> bool:
-    """Whether `dist` really made it into the archive.
-
-    Judged on the distribution's main package, because several projects ship
-    extra top-level shims -- matplotlib owns `pylab` and `mpl_toolkits` -- and
-    a stray shim would otherwise list an excluded package as bundled.
+    """Whether `dist` really made it into the archive, judged on the
+    distribution's main package: several projects ship extra top-level shims,
+    and a stray one would list an excluded package as bundled.
     """
     owned = {n for n, dists in name_to_dists.items() if dist in dists}
     normalized = re.sub(r"[-_.]+", "_", dist).lower()
     primary = {n for n in owned if re.sub(r"[-_.]+", "_", n).lower() == normalized}
-    # Projects whose import name differs from their distribution name (such as
-    # python-dateutil -> dateutil) have no primary, so any owned name counts.
+    # Projects whose import name differs from their distribution name (python-dateutil -> dateutil) have no primary, so any owned name counts.
     return bool((primary or owned) & present)
 
 
@@ -66,8 +60,7 @@ def license_of(meta) -> str:
     ]
     if classifiers:
         return "; ".join(classifiers)
-    # Some projects paste the whole licence into the field; the first line is
-    # the only part that belongs in a table.
+    # Some projects paste the whole licence into the field; only the first line belongs in a table.
     raw = (meta.get("License") or "").splitlines()
     return raw[0][:60] if raw else "see project"
 

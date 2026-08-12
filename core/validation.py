@@ -4,9 +4,7 @@ from typing import Callable, List, Tuple, Union
 
 import numpy as np
 
-# Import for side effects: replaces pyimpspec's loop-driven curvature
-# calculation, which dominates the Kramers-Kronig run time. Must come before
-# the pyimpspec analysis functions are used.
+# Import for side effects: replaces pyimpspec's loop-driven curvature calculation, which dominates the Kramers-Kronig run time.
 import core._pyimpspec_patches  # noqa: F401
 from pyimpspec import (
     KramersKronigResult,
@@ -17,78 +15,47 @@ from pyimpspec import (
 
 ValidationResult = Union[KramersKronigResult, ZHITResult]
 
-# Floor on what an iterative prune may leave behind. Below this a validation
-# fit has too little left to be consistent *with*, and the loop starts chasing
-# its own residuals rather than the data's.
+# Floor on what an iterative prune may leave behind; below this the loop chases its own residuals rather than the data's.
 MIN_POINTS_AFTER_PRUNE = 8
 
-# How a residual is made relative. Both conventions are in use, and they
-# disagree by the factor |Z| / Z_component:
-#
-#   MODULUS   -- DZ'/|Z| and DZ''/|Z|, what pyimpspec reports (Schoenleber et
-#                al. 2014, eqs. 15-16). One common scale for both parts, so a
-#                point's two residuals are directly comparable.
-#   COMPONENT -- DZ'/Z' and DZ''/Z'', each part against its own signed value:
-#                the error on that part as a fraction of that part. Because the
-#                denominator carries Z'''s sign, the imaginary series comes out
-#                mirrored relative to MODULUS on a capacitive sweep. That is
-#                the convention RelaxIS reports and the ordinary definition of
-#                a relative error; see relative_residuals.
-#
-# This is not display-only. The threshold, soft and hard limits reject on
-# whichever convention is chosen, so the limit lines drawn across the residual
-# plot always mark the points that were actually removed.
+# How a residual is made relative: MODULUS divides both parts by |Z| (pyimpspec's), COMPONENT each by its own signed value (RelaxIS's). Governs rejection, not just the plot.
 RESIDUAL_BY_MODULUS = "modulus"
 RESIDUAL_BY_COMPONENT = "component"
 RESIDUAL_MODES = (RESIDUAL_BY_MODULUS, RESIDUAL_BY_COMPONENT)
 
-# COMPONENT is deliberately uncapped. Z'' passes through zero entering an
-# inductive tail and again as an arc closes back onto the real axis, and Z' can
-# be small on a strongly capacitive sweep; the ratio grows without bound there.
-# That is the intent -- a point whose component is not resolved above the noise
-# is a point to drop, and rejection reads these numbers directly.
-#
-# The one case arithmetic cannot express is a component of exactly 0.0; see
-# _relative_to for what happens there.
+# COMPONENT is deliberately uncapped: a component not resolved above the noise is a point to drop, and rejection reads these numbers directly. See _relative_to for a component of exactly 0.0.
 
 
 def _measured_impedances(result: ValidationResult) -> np.ndarray:
-    """Z_exp, recovered from what a validation result carries.
+    """Z_exp, recovered from what a validation result carries: the fit Z_fit and
+    the residuals r = (Z_exp - Z_fit)/|Z_exp|, solved for |Z_exp| through
+    (1 - |r|^2) m^2 - 2 Re(Z_fit * conj(r)) m - |Z_fit|^2 = 0.
 
-    A result stores the fit Z_fit and the residuals r = (Z_exp - Z_fit)/|Z_exp|
-    but not Z_exp itself. Writing m for |Z_exp|, Z_exp = Z_fit + r*m, and
-    taking the modulus of both sides squares to
-
-        (1 - |r|^2) m^2 - 2 Re(Z_fit * conj(r)) m - |Z_fit|^2 = 0,
-
-    whose positive root is m. Exact to rounding while |r| < 1, which a residual
-    of a few percent is by three orders of magnitude.
+    Recoverable only while |r| < 1. There the leading coefficient is positive
+    and the constant term negative, so the two roots straddle zero and the
+    single positive one -- the branch taken below -- is the modulus. At |r| >= 1
+    the leading coefficient turns negative, both roots come out positive, and
+    both reproduce the very same (Z_fit, r) pair: the measurement is genuinely
+    not recoverable, not merely awkward to compute. Those points come back as
+    NaN, and relative_residuals rejects them outright rather than guessing.
     """
     r = np.asarray(result.residuals)
     Z_fit = np.asarray(result.impedances)
     a = 1.0 - np.abs(r) ** 2
     b = -2.0 * np.real(Z_fit * np.conj(r))
     c = -np.abs(Z_fit) ** 2
-    modulus = (-b + np.sqrt(b * b - 4.0 * a * c)) / (2.0 * a)
-    return Z_fit + r * modulus
+    with np.errstate(divide="ignore", invalid="ignore"):
+        modulus = (-b + np.sqrt(b * b - 4.0 * a * c)) / (2.0 * a)
+        Z_exp = Z_fit + r * modulus
+    return np.where(a > 0.0, Z_exp, complex(np.nan, np.nan))
 
 
 def _relative_to(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
     """numerator / denominator, with the two zero-denominator cases decided
-    rather than left to float arithmetic.
-
-    A component of exactly 0.0 is rare -- it needs the measured Z' or Z'' to be
-    a hard zero, not merely small -- but it has to land somewhere:
-
-    * error present, component zero (x/0) -> signed infinity. The error is
-      infinitely large as a fraction of the component, so the point exceeds
-      every threshold and is rejected. That is the limit of the surrounding
-      points' behaviour, not a special case bolted on.
-    * no error, component zero (0/0) -> 0.0. The fit reproduced a component
-      that is itself zero; there is no discrepancy to express as a fraction of
-      anything, and calling that an outlier would be wrong. Left as NaN it
-      would be worse than wrong: NaN fails every `>` comparison, so the point
-      would be silently *kept* whatever the threshold.
+    rather than left to float arithmetic: x/0 -> signed infinity, so the point
+    exceeds every threshold and is rejected, and 0/0 -> 0.0, a perfectly fitted
+    component being no outlier (left as NaN it would fail every `>` and so be
+    silently kept).
     """
     with np.errstate(divide="ignore", invalid="ignore"):
         out = np.asarray(numerator / denominator, dtype=float)
@@ -108,21 +75,19 @@ def relative_residuals(
     if mode == RESIDUAL_BY_MODULUS:
         return freq, res_re, res_im
 
-    # Both conventions share a numerator, so rescaling by |Z| / Z_component is
-    # all that separates them.
-    #
-    # The denominator is signed, not |Z_component|. Z'' is negative across a
-    # capacitive sweep, so taking its magnitude here would mirror the whole
-    # imaginary series about zero -- same numbers, opposite sign, and no longer
-    # comparable point-for-point with RelaxIS, which divides by the signed
-    # component. Sign never reaches rejection either way (residual_deviations
-    # takes absolute values), so this is a plot- and export-facing choice.
+    # Both conventions share a numerator, so |Z| / Z_component is all that separates them; the denominator is signed, as RelaxIS divides, and sign never reaches rejection either way.
     Z_exp = _measured_impedances(result)
     modulus = np.abs(Z_exp)
+    # Where the measurement could not be recovered (|r| >= 1, see
+    # _measured_impedances) the point is already off by at least the whole of
+    # |Z|, so it is past every threshold under any convention -- reported as
+    # infinite rather than left to arrive as a NaN, which _relative_to would
+    # read as a perfect fit and quietly keep.
+    unrecoverable = ~np.isfinite(modulus)
     return (
         freq,
-        _relative_to(res_re * modulus, Z_exp.real),
-        _relative_to(res_im * modulus, Z_exp.imag),
+        np.where(unrecoverable, np.inf, _relative_to(res_re * modulus, Z_exp.real)),
+        np.where(unrecoverable, np.inf, _relative_to(res_im * modulus, Z_exp.imag)),
     )
 
 
@@ -136,16 +101,8 @@ def run_kk_test(
 ) -> KramersKronigResult:
     """Run pyimpspec's linear Kramers-Kronig test on the unmasked points.
     Narrows three defaults: test="complex", admittance=False,
-    num_F_ext_evaluations=10.
-
-    pyimpspec defaults to test="real", which fits the RC amplitudes to Z' alone
-    and leaves only the series L and C to absorb any imaginary-part misfit. Z'
-    is then the fitted quantity and Z'' a byproduct, so the two residual series
-    are not comparably trustworthy: against a RelaxIS reference on the same
-    sweep, the real fit tracks Z' to r = 0.96 but never gets Z'' past r = 0.84
-    at any number of RC elements, while the complex fit reaches r = 1.00 and
-    0.999. Both parts are fitted here, and it costs nothing -- the complex
-    solve timed marginally faster than the real one.
+    num_F_ext_evaluations=10 -- pyimpspec's own test="real" fits Z' alone and
+    leaves Z'' a byproduct, so the two residual series are not comparable.
     """
     return perform_kramers_kronig_test(
         dataset.data,
@@ -231,16 +188,10 @@ def prune_iteratively(
     """Validate, drop the worst offenders, and validate again until nothing is
     left above soft_percent.
 
-    Each pass drops every point above hard_percent at once -- those are bad
-    beyond argument -- and otherwise the single worst point above soft_percent,
-    one per pass, because removing a point moves every other point's residual
-    and the next-worst may well come back inside the limit on its own.
-
-    Both limits are read under `residual_mode` (see RESIDUAL_MODES), so which
-    points count as offenders depends on it.
-
-    Runs on a detached copy, so the caller's mask is untouched and this is safe
-    to hand to a worker thread or subprocess; apply `removed` yourself.
+    Each pass drops every point above hard_percent at once and otherwise the
+    single worst point above soft_percent, one per pass. Both limits are read
+    under `residual_mode` (see RESIDUAL_MODES). Runs on a detached copy, so the
+    caller's mask is untouched -- apply `removed` yourself.
     """
     if soft_percent > hard_percent:
         raise ValueError("The soft limit must not exceed the hard limit.")
@@ -272,8 +223,7 @@ def prune_iteratively(
                 break
             doomed = [max(over_soft)[1]]
 
-        # Both caps stop *before* the removal rather than trimming it, so the
-        # reported result always describes exactly the points that were kept.
+        # Both caps stop *before* the removal, so the reported result describes exactly the points kept.
         if len(outcome.removed) + len(doomed) > max_removed:
             outcome.stop_reason = "limit reached"
             break

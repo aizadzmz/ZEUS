@@ -13,8 +13,7 @@ from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 ROOT = Path(SPECPATH)
 
-# pyproject.toml is the single source of the version: this writes it into the
-# exe's resources, and installer/zeus.iss reads it back off the built exe.
+# pyproject.toml is the single source of the version: this writes it into the exe's resources, and installer/zeus.iss reads it back off the built exe.
 VERSION = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 COMPANY = "Aizad"
 PRODUCT = "ZEUS"
@@ -47,31 +46,21 @@ _version_file.write_text(
     encoding="utf-8",
 )
 
-# pyimpspec reaches some circuit elements and DRT methods through registries
-# rather than plain imports, so sweep both packages in wholesale.
+# pyimpspec reaches some circuit elements and DRT methods through registries rather than plain imports, so sweep both packages in wholesale.
 hiddenimports = collect_submodules("pyimpspec") + collect_submodules("schemdraw")
 
-# cvxopt's extension modules load libopenblas.dll out of a sibling .libs
-# directory, which the binary analysis does not follow on its own.
+# cvxopt's extension modules load libopenblas.dll out of a sibling .libs directory, which the binary analysis does not follow on its own.
 binaries = collect_dynamic_libs("cvxopt")
 
-# gui/app.py resolves these as Path(__file__).parent / "assets", so the bundled
-# copy has to keep the same relative position.
+# gui/app.py resolves these as Path(__file__).parent / "assets", so the bundled copy has to keep the same relative position.
 datas = [
     ("gui/assets", "gui/assets"),
-    # GPLv3 and LGPLv3 both require the licence text to travel with the binary,
-    # so it ships in the app folder rather than only in the installer.
+    # GPLv3 and LGPLv3 both require the licence text to travel with the binary, so it ships in the app folder rather than only in the installer.
     ("LICENSE", "."),
     ("THIRD-PARTY-NOTICES.md", "."),
 ]
 
-# Nothing in core/ or gui/ imports matplotlib: schemdraw draws through its SVG
-# backend and every plot is pyqtgraph. It arrives only as a lazy pyimpspec
-# dependency, for plotting helpers this app never calls. Worth ~50 MB with PIL
-# and fontTools. If a pyimpspec call ever raises ImportError, empty this list.
-# pylab and mpl_toolkits are separate top-level modules from the matplotlib
-# distribution, so excluding "matplotlib" alone leaves them behind as stubs
-# that import a package no longer in the bundle.
+# Nothing here imports matplotlib -- it arrives only as a lazy pyimpspec dependency, worth ~50 MB. pylab and mpl_toolkits ship from the same distribution, so all three have to go.
 UNUSED_PLOTTING = ["matplotlib", "pylab", "mpl_toolkits", "PIL", "fontTools"]
 
 excludes = [

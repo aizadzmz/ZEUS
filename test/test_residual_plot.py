@@ -13,12 +13,10 @@ from core.plotting import _residual_text, build_residuals_plot, point_tip
 from core.validation import RESIDUAL_BY_COMPONENT, RESIDUAL_BY_MODULUS
 from gui.figure_panes import PgSingleFigurePane
 
-# Wide enough to run past the arc's apex, so Z'' gets small at the bottom end
-# -- which is where the component convention goes off scale on real data.
+# Wide enough to run past the arc's apex, so Z'' gets small at the bottom end -- where the component convention goes off scale on real data.
 f = np.logspace(4, -1, 20)
 
-# One decade either side of the apex (~32 Hz for tau = 5 ms), where both parts
-# stay well clear of zero and neither convention runs away.
+# One decade either side of the apex (~32 Hz for tau = 5 ms), where both parts stay well clear of zero.
 f_benign = np.logspace(2.5, 0.5, 20)
 
 
@@ -40,13 +38,10 @@ def app():
 
 
 def _result(zero_imag_at=None):
-    """A clean sweep, optionally with one point whose Z'' rounds to zero.
-
-    Note this is the *realistic* case rather than a true division by zero:
-    relative_residuals reconstructs Z_exp arithmetically, so a measured 0j
-    comes back as ~1e-16 and the residual is enormous but finite. The plot has
-    to survive both, which is why the assertions below check magnitude rather
-    than isinf."""
+    """A clean sweep, optionally with one point whose Z'' rounds to zero -- the
+    *realistic* case rather than a true division by zero, since Z_exp is
+    reconstructed arithmetically and the residual is enormous but finite.
+    """
     w = 2 * np.pi * f
     Z_exp = 10 + 50 / (1 + 1j * w * 5e-3)
     if zero_imag_at is not None:
@@ -79,12 +74,12 @@ def test_series_are_named_for_the_convention(app):
 
 
 def test_the_axis_is_framed_on_the_highest_limit(app):
-    """Not on the data: the limit plus 5 points, whatever the residuals do."""
+    """Not on the data: the limit plus 1 point, whatever the residuals do."""
     for kwargs, expected in (
-        ({"threshold": 2.0}, 7.0),
-        ({"threshold": 5.0, "soft_threshold": 2.0}, 10.0),
+        ({"threshold": 2.0}, 3.0),
+        ({"threshold": 5.0, "soft_threshold": 2.0}, 6.0),
         # Order does not matter -- the higher of the two wins.
-        ({"threshold": 2.0, "soft_threshold": 8.0}, 13.0),
+        ({"threshold": 2.0, "soft_threshold": 8.0}, 9.0),
     ):
         widget = build_residuals_plot(
             _result(zero_imag_at=7), residual_mode=RESIDUAL_BY_COMPONENT, **kwargs
@@ -102,7 +97,7 @@ def test_a_runaway_residual_cannot_set_the_scale(app):
     )
     low, high = _y_range(widget)
     assert np.isfinite(low) and np.isfinite(high), (low, high)
-    assert high == pytest.approx(7.0), high
+    assert high == pytest.approx(3.0), high
 
 
 def test_a_small_residual_does_not_shrink_the_axis(app):
@@ -112,7 +107,7 @@ def test_a_small_residual_does_not_shrink_the_axis(app):
                                   residual_mode=RESIDUAL_BY_MODULUS)
     _, y = _series(widget)["ΔZ' / |Z|"].getData()
     assert np.abs(y).max() < 1.0  # residuals well inside the limit
-    assert _y_range(widget)[1] == pytest.approx(7.0)
+    assert _y_range(widget)[1] == pytest.approx(3.0)
 
 
 def test_a_true_infinity_is_handled_the_same_way(app):
@@ -138,8 +133,7 @@ def test_runaway_residual_is_marked_off_scale(app):
     assert marker is not None, sorted(_series(widget))
     x, y = marker.getData()
     high = _y_range(widget)[1]
-    # Pinned inside an edge, not drawn at its own value. More than one is
-    # expected: the arc's low-frequency end sends Z'' small there too.
+    # Pinned inside an edge, not drawn at its own value; more than one is expected, the arc's low-frequency end sending Z'' small too.
     assert len(y) >= 1
     assert all(0 < abs(v) < high for v in y), y
     # setLogMode has run, so the marker's x values are decades.
@@ -156,12 +150,12 @@ def _with_outlier(percent):
 
 
 def test_an_outlier_inside_the_headroom_is_drawn_at_its_value(app):
-    """A 6% residual against a 2% limit fits in the 7% axis, so it is drawn
+    """A 2.5% residual against a 2% limit fits in the 3% axis, so it is drawn
     rather than pinned -- the headroom is there to be used."""
-    widget = build_residuals_plot(_with_outlier(6.0), threshold=2.0,
+    widget = build_residuals_plot(_with_outlier(2.5), threshold=2.0,
                                   residual_mode=RESIDUAL_BY_MODULUS)
     _, y = _series(widget)["ΔZ' / |Z|"].getData()
-    assert abs(y[4]) == pytest.approx(6.0, abs=0.5)
+    assert abs(y[4]) == pytest.approx(2.5, abs=0.4)
     assert "off scale" not in _series(widget)
 
 
@@ -170,7 +164,7 @@ def test_an_outlier_past_the_headroom_is_pinned(app):
     must not drag the axis out to 20 and flatten the rest."""
     widget = build_residuals_plot(_with_outlier(20.0), threshold=2.0,
                                   residual_mode=RESIDUAL_BY_MODULUS)
-    assert _y_range(widget)[1] == pytest.approx(7.0)
+    assert _y_range(widget)[1] == pytest.approx(3.0)
 
     _, y = _series(widget)["ΔZ' / |Z|"].getData()
     assert np.isnan(y[4]), y[4]
@@ -181,9 +175,12 @@ def test_an_outlier_past_the_headroom_is_pinned(app):
 
 def test_no_off_scale_entry_on_a_well_behaved_sweep(app):
     """Neither convention marks anything when both parts stay clear of zero --
-    the ceiling must not fire on ordinary data."""
+    the ceiling must not fire on ordinary data. The 6% limit is what puts the
+    benign sweep's worst component residual (~6.07%) inside the axis; against
+    the 2% limit the 1-point headroom stops well short of it, and pinning is
+    then the correct answer."""
     for mode in (RESIDUAL_BY_MODULUS, RESIDUAL_BY_COMPONENT):
-        widget = build_residuals_plot(_benign(), threshold=2.0, residual_mode=mode)
+        widget = build_residuals_plot(_benign(), threshold=6.0, residual_mode=mode)
         assert "off scale" not in _series(widget), mode
         for _, item in _series(widget).items():
             assert np.isfinite(item.getData()[1]).all(), mode
@@ -305,10 +302,9 @@ def test_the_right_click_menu_stays_off(app):
 
 # -- point metadata ---------------------------------------------------------
 def _tips(widget):
-    """Every hoverable series' per-point payloads, keyed by series name.
-
-    Off the scatter's parent PlotDataItem: the name is set on the item plot()
-    returns, and the scatter inside it is what carries the payloads."""
+    """Every hoverable series' per-point payloads, keyed by series name. Read
+    off the scatter's parent PlotDataItem: the name is set on the item plot()
+    returns, and the scatter inside it carries the payloads."""
     return {
         item.parentItem().name(): list(item.data["data"])
         for item in widget.interactive_items
@@ -334,8 +330,7 @@ def test_a_point_reports_its_sweep_frequency_and_both_parts(app):
 
     assert text.startswith("Set: Set 01\n")
     assert f"Freq: {f_benign[3]:.4g} Hz" in text
-    # Both parts, as on the Bode plot: a real residual means little without
-    # the imaginary one beside it.
+    # Both parts, as on the Bode plot: a real residual means little without the imaginary one beside it.
     assert "ΔZ' / |Z|: " in text and "ΔZ'' / |Z|: " in text
     assert text.count("%") == 2
 

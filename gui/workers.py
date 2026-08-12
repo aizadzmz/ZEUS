@@ -8,18 +8,10 @@ from typing import Callable, List
 
 from PySide6.QtCore import QThread, Signal
 
-# Cap on validation subprocesses, kept small on purpose. Each is a fresh
-# interpreter importing pyimpspec/numpy/scipy -- ~6 s and a few hundred MB
-# before computing anything -- and an 8-worker pool exhausted the paging file
-# ("DLL load failed ... _core" -> BrokenProcessPool). The batch is
-# import-bound, not CPU-bound, so more workers mostly buy memory pressure.
+# Cap on validation subprocesses, kept small: each is a fresh interpreter importing pyimpspec/numpy/scipy (~6 s, a few hundred MB), and an 8-worker pool exhausted the paging file.
 MAX_VALIDATION_WORKERS = 4
 
-# Only spread a batch across processes when the work left after the first sweep
-# should take at least this long. Every worker pays that ~6 s import up front,
-# so short batches lose outright, as does Z-HIT at any realistic size
-# (~0.16 s/sweep). The margin over break-even (~8 s) is deliberate: pooling also
-# costs memory and pickling, so it should only be used where it wins clearly.
+# Only spread a batch across processes when the work left after the first sweep should take at least this long, every worker paying that ~6 s import up front.
 PARALLEL_MIN_ESTIMATED_SECONDS = 20.0
 
 
@@ -35,21 +27,16 @@ def _is_picklable(obj) -> bool:
 
 class _BatchWorker(QThread):
     """A QThread that walks a batch of datasets and can be asked to stop.
-
-    Cancellation is checked between datasets, not inside one: the work is a
-    single pyimpspec call per sweep with no callback to interrupt it, so the
-    honest guarantee is "no sweep after this one", not "stop now". That is
-    enough for the case it exists to serve -- quitting the app without
-    destroying a live thread, which aborts the process (0xC0000409).
+    Cancellation is checked between datasets, not inside one, so the honest
+    guarantee is "no sweep after this one", not "stop now" -- enough to quit
+    the app without destroying a live thread, which aborts the process.
     """
 
     def __init__(self, runner: Callable, datasets: List, parent=None):
         super().__init__(parent)
         self._runner = runner
         self._datasets = datasets
-        # Plain bool rather than a lock: it is written once from the UI thread
-        # and read between sweeps on this one, and a missed read costs one
-        # extra sweep, not correctness.
+        # Plain bool rather than a lock: written once from the UI thread, read between sweeps here, and a missed read costs one extra sweep.
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -62,11 +49,9 @@ class _BatchWorker(QThread):
 
 
 class ValidationWorker(_BatchWorker):
-    """Runs a validation method (KK or Z-HIT) over several datasets.
-
-    The runner decides what a "result" is: a plain ValidationResult for a
-    single pass, or a core.validation.PruneOutcome when the runner is an
-    iterative prune, which is many passes and reports what it removed."""
+    """Runs a validation method (KK or Z-HIT) over several datasets. The runner
+    decides what a "result" is: a plain ValidationResult for a single pass, or a
+    core.validation.PruneOutcome when the runner is an iterative prune."""
 
     result_ready = Signal(str, str, object)  # method name, dataset key, result
     error = Signal(str, str)                 # dataset key, message
@@ -95,8 +80,7 @@ class ValidationWorker(_BatchWorker):
 
         unfinished = self._run_pooled(rest)
         if unfinished:
-            # The pool failed as a whole (a worker died, memory ran out).
-            # Finish the rest here, so a pool problem costs speed, not the run.
+            # The pool failed as a whole (a worker died, memory ran out); finish the rest here, so it costs speed rather than the run.
             self._run_serial(unfinished)
 
     def _worth_pooling(self, seconds_per_sweep: float, rest: List) -> bool:
@@ -114,9 +98,7 @@ class ValidationWorker(_BatchWorker):
                 futures = {pool.submit(self._runner, ds): ds for ds in datasets}
                 for future in as_completed(futures):
                     if self._cancelled:
-                        # Drops what has not started and stops waiting on what
-                        # has; the subprocesses still running are torn down by
-                        # the pool's own exit.
+                        # Drops what has not started and stops waiting on what has; running subprocesses are torn down by the pool's own exit.
                         pool.shutdown(wait=False, cancel_futures=True)
                         break
                     ds = futures[future]
@@ -129,8 +111,7 @@ class ValidationWorker(_BatchWorker):
                     outstanding.pop(ds.key, None)
         except Exception:
             pass
-        # Nothing is outstanding once cancelled -- it was abandoned, not missed,
-        # and run() must not hand it to the serial fallback to be redone.
+        # Nothing is outstanding once cancelled -- it was abandoned, not missed -- so run() must not redo it serially.
         return [] if self._cancelled else list(outstanding.values())
 
     def _run_serial(self, datasets: List) -> None:

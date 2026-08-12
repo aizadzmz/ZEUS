@@ -1,11 +1,9 @@
-"""The loosely-structured .txt/.csv importer.
+"""The loosely-structured .txt/.csv importer, the only way data enters the app
+for instruments with no supported export format.
 
-This parser is the only way data enters the app for instruments with no
-supported export format, and it guesses: the delimiter, where the table
-starts, what each column means, and where one sweep ends and the next begins.
-Every one of those guesses is silent when it goes wrong, so they are pinned
-here -- including on the demo files that ship with the app, which are the
-shape a regression would be noticed on last.
+It guesses the delimiter, where the table starts, what each column means, and
+where one sweep ends. Every one of those guesses is silent when it goes wrong,
+so they are pinned here -- including on the demo files that ship with the app.
 """
 from pathlib import Path
 

@@ -2,8 +2,7 @@
 marker size and line width shared by every sweep.
 
 Per file rather than per sweep by design -- sweeps within a file are told apart
-by color (core.plotting.SERIES_COLORS, cycled by sweep index), and shape is
-what separates one file from another when several are open.
+by color, and shape is what separates one file from another.
 """
 
 from __future__ import annotations
@@ -27,8 +26,7 @@ from core.plotting import MARKER_SHAPES, default_marker_for
 from gui import style
 from gui.steps.base import add_combo_items, compact_combo, section_label
 
-# Past this many files the per-file rows get their own scroll area rather than
-# growing the dialog past a small screen.
+# Past this many files the per-file rows get their own scroll area rather than growing the dialog past a small screen.
 _SCROLL_AFTER = 8
 
 
@@ -56,8 +54,7 @@ class MarkerStyleDialog(QDialog):
 
         form = QFormLayout()
         form.setSpacing(style.GROUP_SPACING)
-        # Both spinboxes are narrow; without this the label column stretches to
-        # the width of the longest file name in the section below.
+        # Both spinboxes are narrow; without this the label column stretches to the longest file name below.
         form.setRowWrapPolicy(QFormLayout.DontWrapRows)
 
         self._size_spin = QDoubleSpinBox()
@@ -120,8 +117,7 @@ class MarkerStyleDialog(QDialog):
         for position, (file_id, name) in enumerate(files):
             combo = compact_combo(QComboBox())
             add_combo_items(combo, [(label, symbol) for label, symbol in MARKER_SHAPES])
-            # Falls back to the shape this file would get anyway, so the dialog
-            # opens showing what is already on screen.
+            # Falls back to the shape this file would get anyway, so the dialog opens showing what is on screen.
             current = markers.get(file_id, default_marker_for(position))
             index = combo.findData(current)
             combo.setCurrentIndex(index if index >= 0 else 0)

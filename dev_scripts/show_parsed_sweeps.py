@@ -2,8 +2,7 @@
 test.
 
 Point SAMPLE_FILE at a local .mpt and run it directly; each plot blocks until
-you close its window. Lived in test/ until it was moved here, where pytest
-does not try to collect it.
+you close its window.
 """
 
 from pathlib import Path

@@ -1,7 +1,6 @@
-"""The point metadata box must never be cropped by the plot's own edges.
-
-It is a fixed-size overlay hung off a data point, so a point near the right or
-top edge used to push it under the legend column or the title.
+"""The point metadata box must never be cropped by the plot's own edges: it is
+a fixed-size overlay hung off a data point, so a point near the right or top
+edge used to push it under the legend column or the title.
 """
 import os
 

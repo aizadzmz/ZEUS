@@ -15,21 +15,15 @@ from PySide6.QtWidgets import (
 
 from core.plotting import point_tip
 
-# The overlay card's look lives in gui.style's QSS block, keyed off the
-# objectName set in _build_overlay.
+# The overlay card's look lives in gui.style's QSS block, keyed off the objectName set in _build_overlay.
 
-# How long the cursor must rest on a point before its metadata box appears.
-# PyQtGraph's own hover tooltip uses QToolTip, whose ~700ms delay is not
-# configurable here, so this pane runs its own timer (see _on_point_hovered).
+# How long the cursor must rest on a point before its metadata box appears; QToolTip's ~700 ms is not configurable, so this pane runs its own timer.
 HOVER_DELAY_MS = 150
 
 
 class _PointMetadataMixin:
-    """The metadata box a plotted point shows on hover or on click.
-
-    Shared by both panes below: the box, the hover delay and the fitting that
-    keeps it inside the plotted area are the same wherever points are
-    hoverable, and only what a *click* means differs -- see
+    """The metadata box a plotted point shows on hover or on click, shared by
+    both panes below -- only what a *click* means differs, see
     _claim_point_click, which PgFigurePane overrides for its eraser.
 
     A host is a QWidget that keeps its PlotWidget in self._widget. It calls
@@ -39,20 +33,14 @@ class _PointMetadataMixin:
     """
 
     def _init_point_metadata(self) -> None:
-        # The metadata box shown on hover or click (see _show_tooltip);
-        # cleared on click-elsewhere so at most one is ever shown. Its point is
-        # kept alongside it so the box can be re-fitted to the plot when the
-        # view moves under it.
+        # The metadata box shown on hover or click, cleared on click-elsewhere so at most one is ever shown; its point is kept so the box can be re-fitted when the view moves.
         self._tooltip_item: Optional[pg.TextItem] = None
         self._tooltip_anchor: Optional[Tuple[float, float]] = None
 
-        # True once a click has pinned the box open; hover then leaves it
-        # alone until the user clicks empty space (see _on_point_hovered).
+        # True once a click has pinned the box open; hover then leaves it alone until the user clicks empty space.
         self._pinned = False
 
-        # Hover shows the box only after the cursor rests on a point for
-        # HOVER_DELAY_MS, so brief mouse-overs while panning don't flash it.
-        # (x, y, text, container) -- see _show_tooltip for the container.
+        # (x, y, text, container) for the pending hover, shown only once the cursor has rested for HOVER_DELAY_MS.
         self._pending_hover: Optional[Tuple[float, float, str, object]] = None
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
@@ -152,14 +140,9 @@ class _PointMetadataMixin:
         self._fit_tooltip_inside_plot()
 
     def _fit_tooltip_inside_plot(self) -> None:
-        """Keep the whole metadata box inside the plotted area.
-
-        The box is a fixed-size overlay hung off a data point, so near an edge
-        it used to run under the axis or the legend and get cropped. Two steps:
-        open it towards whichever side has room, and if it still does not fit
-        -- a box wider than the space either side of the point -- push it back
-        in. That last step breaks the tie to the point, which beats being
-        cropped by it.
+        """Keep the whole metadata box inside the plotted area: open it towards
+        whichever side has room, and if it still does not fit, push it back in.
+        That last step breaks the tie to the point, which beats being cropped.
         """
         item, anchor = self._tooltip_item, self._tooltip_anchor
         if item is None or anchor is None or self._widget is None:
@@ -171,16 +154,13 @@ class _PointMetadataMixin:
         at = view.mapViewToScene(QPointF(x, y))
         pad = 6.0
 
-        # A box wider than the plot cannot be fitted by moving it, so cap it
-        # and let the text wrap. Only ever a long file name in the label; the
-        # numbers below it are short.
+        # A box wider than the plot cannot be fitted by moving it, so cap it and let the text wrap.
         limit = area.width() - 2 * pad
         if limit > 0 and card.width() > limit:
             item.setTextWidth(limit)
             card = item.boundingRect()
 
-        # anchor=(0, 1) puts the box's bottom-left on the point, so by default
-        # it opens right and up; 1 and 0 flip those.
+        # anchor=(0, 1) puts the box's bottom-left on the point, so it opens right and up; 1 and 0 flip those.
         open_left = at.x() + card.width() + pad > area.right()
         if open_left and at.x() - card.width() - pad < area.left():
             open_left = False  # no room either way; the clamp below handles it
@@ -212,17 +192,11 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
     buttons. Removed points hide via the "Removed" legend swatch."""
 
     replot_requested = Signal()
-    # "Save Image" was clicked. The owner picks the path and calls
-    # save_image(); see _build_overlay.
+    # "Save Image" was clicked; the owner picks the path and calls save_image().
     save_image_requested = Signal()
-    # (ds.key, point index) -- emitted instead of pinning a tooltip when the
-    # eraser is on. The pane only reports which point was hit; the owner
-    # decides what that means. Keyed by ds.key so a click resolves correctly
-    # when several files share "Set NN" labels.
+    # (ds.key, point index), emitted instead of pinning a tooltip when the eraser is on; the owner decides what the hit means.
     point_mask_toggled = Signal(str, int)
-    # The overlay's Eraser button was clicked. As with point_mask_toggled the
-    # pane only reports it: the owner arms every eraser-capable pane together
-    # and locks the rest of the window.
+    # The overlay's Eraser button was clicked; the owner arms every eraser-capable pane together and locks the rest of the window.
     eraser_toggled = Signal(bool)
 
     def __init__(
@@ -235,48 +209,37 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
         self._layout = QVBoxLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._widget: Optional[pg.PlotWidget] = None
-        # Shown instead of a plot when there is nothing to draw; see
-        # set_message.
+        # Shown instead of a plot when there is nothing to draw; see set_message.
         self._message: Optional[QLabel] = None
 
-        # On the pane, not the PlotWidget: set_widget replaces the widget on
-        # every replot, including the one each erase triggers, which would
-        # otherwise turn the mode off after a single click.
+        # On the pane, not the PlotWidget, which set_widget replaces on every replot -- including the one each erase triggers.
         self._eraser = False
         self._eraser_button: Optional[QToolButton] = None
 
         self._overlay: Optional[QWidget] = None
-        # The card's buttons and the chevron that folds them away. Collapsed
-        # state lives on the pane, not the plot, so it survives every replot.
+        # The card's buttons and the chevron that folds them away; collapsed state lives on the pane so it survives every replot.
         self._action_buttons: List[QToolButton] = []
         self._collapse_button: Optional[QToolButton] = None
         if with_overlay_actions:
             self._build_overlay(with_eraser)
 
-        # The last view (pan/zoom or Auto-Scale), so an unrelated replot --
-        # running validation, DRT, etc. -- does not snap back to the default
-        # framing.
+        # The last view (pan/zoom or Auto-Scale), so an unrelated replot does not snap back to the default framing.
         self._locked_range: Optional[Tuple[float, float, float, float]] = None
-        # Which coordinate system that view belongs to (widget.range_key).
-        # Dropped when switching between plots measuring different things
-        # (Nyquist ohms vs Bode log-decades), where the numbers would still
-        # apply and land the new plot off-screen.
+        # Which coordinate system that view belongs to; dropped when switching between plots measuring different things, where the numbers would land the new plot off-screen.
         self._range_key: Optional[str] = None
 
         self._init_point_metadata()
 
     def _build_overlay(self, with_eraser: bool) -> None:
         overlay = QWidget(self)
-        # Scopes the stylesheet's card and button rules to this overlay --
-        # unscoped they would restyle every QToolButton in the app.
+        # Scopes the stylesheet's card and button rules to this overlay, which would otherwise restyle every QToolButton in the app.
         overlay.setObjectName("figureOverlay")
         col = QVBoxLayout(overlay)
         col.setContentsMargins(4, 4, 4, 4)
         col.setSpacing(2)
 
         if with_eraser:
-            # On the plot rather than in the settings column: the eraser locks
-            # that column while it is on, so this has to be the way back out.
+            # On the plot rather than in the settings column: the eraser locks that column, so this has to be the way back out.
             self._eraser_button = QToolButton(overlay)
             self._eraser_button.setText("Eraser")
             self._eraser_button.setCheckable(True)
@@ -313,23 +276,17 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
         save_button.clicked.connect(self.save_image_requested)
         col.addWidget(save_button)
 
-        # Everything the card folds away. The eraser is in here too: on a Bode
-        # plot the card covers the low-frequency end of both series, and half a
-        # card is no less in the way than a whole one.
+        # Everything the card folds away, the eraser included -- on a Bode plot half a card is no less in the way than a whole one.
         self._action_buttons = [
             b for b in (self._eraser_button, replot_button, autoscale_button, save_button)
             if b is not None
         ]
 
-        # Stretched to the widest label rather than each sizing to its own
-        # text, which left the stack with a ragged right edge.
+        # Stretched to the widest label rather than each sizing to its own text, which left a ragged right edge.
         for button in overlay.findChildren(QToolButton):
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        # A sibling of the card, not a child: the card belongs over the plot,
-        # but the chevron is what stays on screen once the card is folded, so
-        # it lives *outside* the plotted area -- down in the x-axis strip,
-        # where it covers no data at all.
+        # A sibling of the card, not a child: the chevron is what stays on screen once the card is folded, so it lives outside the plotted area.
         self._collapse_button = QToolButton(self)
         self._collapse_button.setObjectName("figureOverlayCollapse")
         self._collapse_button.setCheckable(True)
@@ -341,8 +298,7 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
     def _set_overlay_collapsed(self, collapsed: bool) -> None:
         """Fold the action card away, or open it again in its usual corner."""
         self._overlay.setVisible(not collapsed and self._widget is not None)
-        # Chevrons rather than a label: the direction matches where the card
-        # goes, since it opens upwards into the plot from here.
+        # Chevrons rather than a label: the direction matches where the card goes, opening upwards into the plot.
         self._collapse_button.setText("⌃" if collapsed else "⌄")
         self._collapse_button.setToolTip(
             "Show the plot buttons" if collapsed else "Hide the plot buttons"
@@ -380,22 +336,15 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
 
         self._reposition_collapse_button(right, bottom)
 
-        # Clamped to the plot area's top-left as well as its bottom-right: a
-        # multi-file legend takes its width from the plot, and once the stack
-        # no longer fits the corner it should overflow inwards, over the plot,
-        # rather than out into the legend column.
+        # Clamped to the plot area's top-left as well as its bottom-right, so a stack too big for the corner overflows inwards over the plot rather than out into the legend column.
         x = max(left, right - self._overlay.width() - margin)
         y = max(top, bottom - self._overlay.height() - margin)
         self._overlay.move(max(0, int(x)), max(0, int(y)))
 
     def _reposition_collapse_button(self, plot_right: int, plot_bottom: int) -> None:
-        """Sit the chevron in the strip below the plot, right-aligned with it.
-
-        Outside the plotted area on purpose -- folded, this is the only thing
-        left, and the whole point was to stop it covering data. It is pinned to
-        the bottom of the pane so it clears the tick labels, and right-aligned
-        with the plot rather than the pane so it stays clear of the legend
-        column and lands under the end of the x-axis.
+        """Sit the chevron in the strip below the plot, right-aligned with it --
+        outside the plotted area on purpose, clear of the tick labels and of the
+        legend column, so it lands under the end of the x-axis.
         """
         if self._collapse_button is None:
             return
@@ -404,9 +353,7 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
         size = self._collapse_button.size()
 
         x = max(0, int(plot_right) - size.width())
-        # Below the plot, and as low in the pane as it will go. The max() is
-        # for a pane too short to have a strip: the chevron then sits just
-        # under the plot edge rather than climbing back over the data.
+        # Below the plot and as low in the pane as it will go; the max() is for a pane too short to have an x-axis strip.
         y = max(int(plot_bottom) + 1, self.height() - size.height() - 2)
         self._collapse_button.move(x, min(y, max(0, self.height() - size.height())))
         self._collapse_button.raise_()
@@ -416,8 +363,7 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
         pan/zoom and the Auto-Scale button alike."""
         (xlo, xhi), (ylo, yhi) = view_range
         self._locked_range = (xlo, xhi, ylo, yhi)
-        # A pinned box outlives the view it was placed against, and panning can
-        # carry it under an edge; re-fit it where it now sits.
+        # A pinned box outlives the view it was placed against, and panning can carry it under an edge.
         self._fit_tooltip_inside_plot()
 
     def _autoscale(self) -> None:
@@ -425,10 +371,7 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
         back to the default framing when every point is masked."""
         if self._widget is None:
             return
-        # getattr, not attribute access: a PlotWidget forwards an unknown name
-        # to its PlotItem and raises AttributeError, so a figure built without
-        # these -- the button is on every pane, the attributes are set per
-        # builder -- would bring the window down rather than do nothing.
+        # getattr, not attribute access: a PlotWidget forwards an unknown name to its PlotItem and raises, and the button is on every pane while the attributes are set per builder.
         bounds = getattr(self._widget, "kept_range", None) or getattr(
             self._widget, "full_range", None
         )
@@ -448,6 +391,12 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
         if path.lower().endswith(".svg"):
             from pyqtgraph.exporters import SVGExporter
 
+            # pyqtgraph 0.14.0's exporter cannot parse the closepath Qt writes
+            # into a filled rectangle, and every plot here has one; see
+            # core._pyqtgraph_patches.
+            from core import _pyqtgraph_patches
+
+            _pyqtgraph_patches.apply()
             SVGExporter(plot_item).export(path)
         else:
             from pyqtgraph.exporters import ImageExporter
@@ -471,22 +420,26 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
         range_key, locked = state
         self._range_key = range_key
         self._locked_range = locked
+        # A step already drawn is not redrawn on the way in, so set_widget never
+        # runs and the framing has to reach the plot on screen from here. On a
+        # mismatch it is left alone; the next set_widget drops the range anyway.
+        if self._widget is not None and getattr(self._widget, "range_key", None) == range_key:
+            xlo, xhi, ylo, yhi = locked
+            self._widget.getPlotItem().getViewBox().setRange(
+                xRange=(xlo, xhi), yRange=(ylo, yhi), padding=0
+            )
 
     def set_eraser_enabled(self, enabled: bool) -> None:
         """Turn click-to-mask/unmask on or off. While on, clicking a point
         reports it via point_mask_toggled instead of pinning a box."""
         self._eraser = enabled
         if self._eraser_button is not None:
-            # Blocked: one click arms every pane, and the echo back into this
-            # pane's own button would toggle the mode straight off again.
+            # Blocked: one click arms every pane, and the echo back into this pane's own button would toggle the mode straight off again.
             self._eraser_button.blockSignals(True)
             self._eraser_button.setChecked(enabled)
             self._eraser_button.blockSignals(False)
         if self._collapse_button is not None:
-            # The eraser locks the rest of the window, and its button is the
-            # way back out -- so while it is armed the card is held open and
-            # the chevron refuses. Folding it away would strand the user with
-            # a locked window and nothing to click.
+            # While the eraser is armed the card is held open and the chevron refuses -- folding it away would strand the user with a locked window and nothing to click.
             if enabled and self._collapse_button.isChecked():
                 self._collapse_button.setChecked(False)
             self._collapse_button.setEnabled(not enabled)
@@ -532,27 +485,19 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
             xlo, xhi, ylo, yhi = self._locked_range
             view_box.setRange(xRange=(xlo, xhi), yRange=(ylo, yhi), padding=0)
         view_box.sigRangeChanged.connect(self._on_range_changed)
-        # The plotted area is not fixed once the widget is laid out: the legend
-        # column is sized from its entries, so a multi-file plot narrows the
-        # ViewBox after the fact and would leave the overlay stranded over the
-        # legend. Follow the ViewBox instead of placing the buttons once.
+        # The plotted area is not fixed once the widget is laid out: the legend column is sized from its entries, so a multi-file plot narrows the ViewBox after the fact.
         view_box.geometryChanged.connect(self._reposition_overlay)
 
         self._connect_point_metadata(widget)
 
-        # The eraser mode outlives the widget it was set on, so tell the fresh
-        # widget about it again.
+        # The eraser mode outlives the widget it was set on, so tell the fresh widget about it again.
         self._apply_eraser_cursor()
 
         if self._overlay is not None:
-            # Shown again in case set_message hid it, and folded again if that
-            # is how the user left it -- the card belongs to the pane, not to
-            # the figure being swapped in.
+            # Shown again in case set_message hid it, and folded again if that is how the user left it.
             self._set_overlay_collapsed(self._collapse_button.isChecked())
             self._overlay.raise_()
-            # Deferred: the new PlotWidget has not processed its layout event
-            # yet, so its ViewBox would report stale geometry and the buttons
-            # would snap to the wrong spot for one frame.
+            # Deferred: the new PlotWidget has not processed its layout event, so its ViewBox would report stale geometry.
             QTimer.singleShot(0, self._reposition_overlay)
 
     def set_message(self, text: str) -> None:
@@ -564,8 +509,7 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
         self._message.setAlignment(Qt.AlignCenter)
         self._message.setObjectName("figureMessage")
         self._layout.addWidget(self._message)
-        # Replot/Auto-Scale/Save Image all act on a plot that isn't there, and
-        # the chevron has nothing to fold.
+        # Replot/Auto-Scale/Save Image all act on a plot that isn't there, and the chevron has nothing to fold.
         if self._overlay is not None:
             self._overlay.hide()
             self._collapse_button.hide()
@@ -583,18 +527,13 @@ class PgFigurePane(_PointMetadataMixin, QWidget):
 
 
 class PgSingleFigurePane(_PointMetadataMixin, QWidget):
-    """Holds at most one PlotWidget, filling whatever height it is given.
+    """Holds at most one PlotWidget, filling whatever height it is given -- home
+    of the residual figure.
 
-    Home of the residual figure. It replaced a scrolling stack of figures,
-    which the Validation step no longer produces -- residuals are drawn in
-    Singular view only, one sweep at a time -- and whose per-figure minimum
-    height put a scrollbar on the one figure it did draw.
-
-    Not a PgFigurePane: that one remembers its pan/zoom across replots, and the
-    residual axis is framed from the current limits (see
-    core.plotting.build_residuals_plot), so it has to re-frame when those
-    change or when the pager moves on. The metadata boxes are shared, though --
-    a residual point answers the same questions as a Nyquist one.
+    Not a PgFigurePane: that one remembers its pan/zoom across replots, while
+    the residual axis is framed from the current limits and has to re-frame
+    when those change or when the pager moves on. The metadata boxes are
+    shared, though.
     """
 
     def __init__(self, parent: Optional[QWidget] = None):
@@ -614,11 +553,7 @@ class PgSingleFigurePane(_PointMetadataMixin, QWidget):
         self._connect_point_metadata(widget)
 
         view_box = widget.getPlotItem().getViewBox()
-        # A box is placed against the view it was opened in, and both of these
-        # move it out from under it: the wheel rescales y, and the splitter
-        # above resizes the plot (which also re-lays the legend column, so the
-        # plotted area narrows after the fact). Re-fit rather than let an edge
-        # crop it.
+        # A box is placed against the view it was opened in, and both the wheel and the splitter above move it out from under it.
         view_box.sigRangeChanged.connect(self._on_range_changed)
         view_box.geometryChanged.connect(self._fit_tooltip_inside_plot)
 

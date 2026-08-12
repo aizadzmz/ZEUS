@@ -19,8 +19,7 @@ def apply_theme(mode: str) -> None:
     if mode not in THEMES:
         mode = "light"
     t = style.tokens(mode)
-    # Per-mode, not the bare ACCENT: navy is near-black against the dark
-    # background, so dark mode drives qdarktheme from its lightened accent.
+    # Per-mode, not the bare ACCENT: navy is near-black against the dark background.
     qdarktheme.setup_theme(
         mode,
         custom_colors={"primary": t["accent"]},
@@ -28,7 +27,6 @@ def apply_theme(mode: str) -> None:
     )
     style.apply_app_font()
 
-    # PyQtGraph has no figure/axes split: "background" covers both, and
-    # "foreground" covers axis lines, ticks, and labels together.
+    # PyQtGraph has no figure/axes split: "background" covers both, "foreground" axis lines, ticks and labels together.
     pg.setConfigOption("background", t["surface"])
     pg.setConfigOption("foreground", t["text"])

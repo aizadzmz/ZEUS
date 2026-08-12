@@ -7,22 +7,16 @@ from typing import Dict, Iterable, List, Optional, Set
 
 from PySide6.QtCore import QObject, Signal
 
-# How many sweeps start checked per loaded file -- per file, not overall, so
-# opening a batch does not leave everything past the first file unchecked.
-# The checked set is exactly what analyses process, so a cap here trades a
-# lighter first analysis run against having to go and check the rest by hand.
-# None means no cap: every sweep in every file starts checked.
+# How many sweeps start checked per loaded file -- per file, not overall. The checked set is exactly what analyses process; None means no cap.
 DEFAULT_SWEEPS_CHECKED_PER_FILE: Optional[int] = None
 
 
 class SweepSelection(QObject):
     """The checked set of sweeps plus a cursor into it."""
 
-    # Membership of the checked set changed. Analyses and plot contents both
-    # depend on this, so MainWindow routes it into _refresh().
+    # Membership of the checked set changed. Analyses and plot contents both depend on it, so MainWindow routes it into _refresh().
     selection_changed = Signal()
-    # The cursor moved; the set is unchanged. Only Single-mode drawing
-    # depends on this.
+    # The cursor moved; the set is unchanged. Only Single-mode drawing depends on this.
     cursor_moved = Signal()
 
     def __init__(self, parent: Optional[QObject] = None):
@@ -40,8 +34,7 @@ class SweepSelection(QObject):
         if checked_keys is None:
             self._checked = self._default_checked()
         else:
-            # Intersected, not trusted: a restored session may name sweeps
-            # from a file no longer loaded.
+            # Intersected, not trusted: a restored session may name sweeps from a file no longer loaded.
             wanted = set(checked_keys)
             self._checked = {ds.key for ds in self._datasets if ds.key in wanted}
 
@@ -93,11 +86,9 @@ class SweepSelection(QObject):
             self.cursor_moved.emit()
 
     def set_checked_many(self, keys: Iterable[str], checked: bool) -> None:
-        """Check or uncheck a group of sweeps as one edit.
-
-        Looping over set_checked() instead would emit selection_changed per
-        sweep, and MainWindow turns each of those into a full replot -- so
-        ticking one 50-sweep file would redraw the plots 50 times.
+        """Check or uncheck a group of sweeps as one edit. Looping over
+        set_checked() would emit selection_changed per sweep, and MainWindow
+        turns each of those into a full replot.
         """
         keys = set(keys)
         new = self._checked | keys if checked else self._checked - keys
@@ -172,10 +163,8 @@ class SweepSelection(QObject):
 
     def _checked_files(self) -> List[tuple]:
         """The checked sweeps grouped by source file, in load order, as
-        (file_id, key of its first checked sweep).
-
-        Files with nothing checked do not appear: paging by file lands on a
-        sweep, so a file offering none is not a place the cursor can go.
+        (file_id, key of its first checked sweep). Files with nothing checked do
+        not appear: paging by file lands on a sweep.
         """
         files: List[tuple] = []
         seen: Set[int] = set()
@@ -198,11 +187,8 @@ class SweepSelection(QObject):
 
     def step_file(self, delta: int) -> None:
         """Move the cursor to the first checked sweep of the file delta places
-        away, clamping at both ends rather than wrapping.
-
-        Always lands on that file's first sweep, including when stepping back
-        from mid-file -- `‹‹` means "the file before this one", not "the top of
-        this one", so two clicks never sit on the same file.
+        away, clamping at both ends rather than wrapping. Always that file's
+        first sweep, so two clicks never sit on the same file.
         """
         files = self._checked_files()
         if not files:

@@ -16,30 +16,23 @@ if TYPE_CHECKING:
 
     from core.circuit_model import ConnectionNode
 
-# Element body length and parallel-branch separation, in drawing units. Larger
-# than pyimpspec's defaults (2.0, 1.5) because every element carries a label
-# above *and* below: the width keeps "1.234 mS·sⁿ" clear of its neighbor, the
-# height keeps a two-line value block off the branch below.
+# Element body length and branch separation, in drawing units; larger than pyimpspec's defaults because every element is labelled above and below.
 UNIT_WIDTH = 3.4
 NODE_HEIGHT = 2.6
 
-# Label sizes in points; values smaller than names so the name reads as the
-# heading of the pair.
+# Label sizes in points; values smaller than names so the name reads as the heading.
 NAME_FONTSIZE = 12.0
 VALUE_FONTSIZE = 10.0
-# Label distance from the element body, in drawing units. schemdraw's default
-# (0.1) does not clear the wire once the label is a two-line block.
+# Label distance from the element body; schemdraw's 0.1 does not clear the wire.
 LABEL_OFFSET = 0.45
 # Gap between value lines under one element, in drawing units (1 unit = 36 pt).
 LINE_SPACING = 0.36
 
-# Blank space in points around the finished drawing. schemdraw underestimates
-# text extents when sizing the SVG and clips the top label without this.
+# Padding in points: schemdraw underestimates text extents and would clip the top label.
 SVG_PADDING = 16.0
 
 # --- hit-region geometry, in drawing units -----------------------------------
-# A placed element spans the full UNIT_WIDTH including leads, so neighbours in a
-# series touch; insetting its box leaves room for the gap target between them.
+# Insetting a placed element's box leaves room for the gap target between the neighbours it touches.
 ELEMENT_INSET = 0.6
 # Half-extents of a gap box, kept under ELEMENT_INSET so the two never overlap.
 GAP_HALF_WIDTH = 0.5
@@ -57,8 +50,7 @@ _PREFIXES = {
 }
 _MIN_EXPONENT, _MAX_EXPONENT = min(_PREFIXES), max(_PREFIXES)
 
-# pyimpspec spells units in ASCII; these are the typeset forms the rest of the
-# app uses. Anything unlisted falls back to _unit_text's generic cleanup.
+# Typeset forms of pyimpspec's ASCII units; anything unlisted falls back to _unit_text.
 _UNIT_TEXT = {
     "": "",
     "ohm": "Ω",
@@ -128,9 +120,7 @@ def format_quantity(value: float, unit: str) -> str:
         return f"0 {text_unit}"
 
     exponent = math.floor(math.log10(abs(value)))
-    # Round down to a multiple of three so the mantissa lands in 1-999, then
-    # clamp -- past femto/tera there is no prefix left, and the plain %g
-    # spelling the clamp produces is still honest.
+    # Round down to a multiple of three for a 1-999 mantissa, then clamp at femto/tera.
     scale = max(_MIN_EXPONENT, min(_MAX_EXPONENT, (exponent // 3) * 3))
     return f"{value / 10.0**scale:.4g} {_PREFIXES[scale]}{text_unit}"
 
@@ -218,9 +208,7 @@ def _build_svg(
     from schemdraw.backends import svg as svg_backend
     from schemdraw.backends.svg import config as svg_config
 
-    # Qt's SVG renderer is SVG 1.2 Tiny, which has no dominant-baseline, so
-    # every label would be drawn a line-height off. schemdraw's "Batik" mode
-    # positions text by computed y instead.
+    # Qt's SVG 1.2 Tiny has no dominant-baseline; schemdraw's "Batik" mode positions by y.
     svg_config.useBatik = True
 
     symbols = _schemdraw_symbols()
@@ -244,10 +232,7 @@ def _build_svg(
             fontsize=NAME_FONTSIZE,
             color=foreground,
         )
-        # One label call per line, each pushed further from the element. A list
-        # would space them *along* the element, and a newline-joined string
-        # becomes <tspan dy=...>, which Qt's SVG 1.2 Tiny renderer ignores --
-        # both collapse a two-parameter element onto one line.
+        # One label call per line: a list spaces them along the element, and Qt ignores the <tspan dy=...> a newline-joined string becomes.
         for offset, line in enumerate(_value_lines(name, element, parameters, show_errors)):
             symbol.label(
                 line,
@@ -258,8 +243,7 @@ def _build_svg(
             )
         drawing.add(symbol.right())
         if node is not None:
-            # includetext=False: labels sit clear of the body and would make
-            # adjacent components' targets overlap.
+            # includetext=False: labels sit clear of the body and would overlap targets.
             left, bottom, right, top = symbol.get_bbox(transform=True, includetext=False)
             record("element", node, (left + ELEMENT_INSET, bottom, right - ELEMENT_INSET, top))
 
@@ -267,8 +251,7 @@ def _build_svg(
         if isinstance(item, Element):
             return UNIT_WIDTH
         if isinstance(item, Series):
-            # The +1.0 is the half-unit of lead drawn either side of a
-            # parallel block nested inside a series one (see draw_series).
+            # +1.0 for the half-unit of lead either side of a nested parallel block.
             return sum(
                 width(child) + (1.0 if isinstance(child, Parallel) else 0.0)
                 for child in item
@@ -287,8 +270,7 @@ def _build_svg(
         heights = [height(branch) for branch in branches]
         top_x, top_y = drawing.here
 
-        # Drop to the lowest branch, remembering each rung on the way down,
-        # so the branches can be drawn bottom-up and popped back to the node.
+        # Drop to the lowest branch, remembering each rung, so they draw bottom-up.
         for index in range(len(branches) - 1):
             drawing.push()
             drawing.add(elm.Line(l=heights[index]).down())
@@ -326,9 +308,7 @@ def _build_svg(
         for index, (item, child) in enumerate(zip(items, children_of(node))):
             gap_at(index, drawing, node)
             if isinstance(item, Parallel):
-                # Short leads keep adjacent parallel blocks (the usual
-                # R(RQ)(RQ) shape) off a shared vertical rail, which would
-                # read as one four-branch node.
+                # Short leads keep adjacent parallel blocks (the usual R(RQ)(RQ) shape) off a shared vertical rail, which would read as one four-branch node.
                 if not outermost:
                     drawing.add(elm.Line(l=0.5).right())
                 draw_parallel(item, drawing, child)
@@ -360,8 +340,7 @@ def _build_svg(
     )
     drawing.add(elm.Dot(open=True))
     drawing.add(elm.Line(l=1.0).right())
-    # A Circuit always reports exactly one outermost Series (the implicit
-    # square brackets of the CDC), which is the connection to walk.
+    # A Circuit always reports one outermost Series -- the CDC's implicit brackets.
     draw_series(circuit.get_connections(recursive=False)[0], drawing, tree, outermost=True)
     drawing.add(elm.Line(l=1.0).right())
     drawing.add(elm.Dot(open=True))

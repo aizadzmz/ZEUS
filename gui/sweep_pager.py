@@ -23,8 +23,7 @@ class SweepPager(QWidget):
         row.setContentsMargins(*style.CONTENT_MARGINS)
         row.setSpacing(style.LIST_SPACING)
 
-        # Metadata about the plot rather than part of it: muted, and a size
-        # down from the body text.
+        # Metadata about the plot rather than part of it: muted, and a size down from the body text.
         self.file_label = QLabel("—")
         self.file_label.setToolTip("Sweep file.")
         self.set_label = QLabel("—")
@@ -45,10 +44,7 @@ class SweepPager(QWidget):
             label.setFont(font)
         row.addWidget(self.position_label)
 
-        # `‹‹ ‹ | › ››`: the inner pair walks the checked sweeps flat, crossing
-        # into the next file at a file's end; the outer pair skips a whole file
-        # at a time. The gap groups them by direction, as a media player does,
-        # so the four do not read as one undifferentiated run of arrows.
+        # `‹‹ ‹ | › ››`: the inner pair walks the checked sweeps flat, the outer pair skips a whole file, and the gap groups them by direction as a media player does.
         self.prev_file_button = QToolButton()
         self.prev_file_button.setText("‹‹")
         self.prev_file_button.setToolTip("First sweep of the previous file")
@@ -75,9 +71,7 @@ class SweepPager(QWidget):
         self.next_file_button.clicked.connect(lambda: self._selection.step_file(1))
         row.addWidget(self.next_file_button)
 
-        # Both signals matter: the cursor moves on its own, but checking or
-        # unchecking sweeps also changes the "2 of 7" readout and can reseat
-        # the cursor.
+        # Both signals matter: the cursor moves on its own, but checking sweeps also changes the "2 of 7" readout and can reseat it.
         self._selection.cursor_moved.connect(self.sync)
         self._selection.selection_changed.connect(self.sync)
         self.sync()

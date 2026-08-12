@@ -1,10 +1,9 @@
 """The progress bar across the top naming the four workflow stages, and
 switching between them.
 
-Drawn rather than assembled from widgets: the design is a label row sitting
-over a continuous track with a node per stage, and a QToolButton row cannot
-produce the line running *behind* the nodes without a second overlay widget.
-One paintEvent keeps the geometry in a single place."""
+Drawn rather than assembled from widgets: a QToolButton row cannot produce the
+line running *behind* the nodes, and one paintEvent keeps the geometry in a
+single place."""
 
 from __future__ import annotations
 
@@ -26,7 +25,6 @@ STEPS: Tuple[Tuple[str, str], ...] = (
 )
 
 # ------------------------------------------------------------- geometry
-#
 # All in device-independent pixels, measured from the widget's own rect.
 
 NODE_RADIUS = 5.5        # outer radius of a stage node
@@ -82,25 +80,20 @@ class StepBar(QWidget):
     def _label_font(self) -> QFont:
         font = QFont(self.font())
         font.setBold(True)
-        # Every metric below -- node spacing, track height, sizeHint -- is
-        # measured from this font, so the bar reflows around the new size.
+        # Every metric below -- node spacing, track height, sizeHint -- is measured from this font.
         font.setPointSizeF(style.FONT_PT_STEPPER)
         return font
 
     def _metrics(self) -> QFontMetricsF:
-        """Metrics bound to this widget as the paint device.
-
-        A QFontMetrics built from the font alone measures against the
-        application's default DPI. On a fractionally scaled screen that comes
-        out narrower than what QPainter actually lays out, and a label rect
-        sized from it elides text that in fact fits.
+        """Metrics bound to this widget as the paint device. One built from the
+        font alone measures against the application's default DPI, which on a
+        fractionally scaled screen elides text that in fact fits.
         """
         return QFontMetricsF(self._label_font(), self)
 
     def _label_widths(self) -> List[int]:
         fm = self._metrics()
-        # Rounded up, never down: a rect a fraction of a pixel short of the
-        # text is a rect that elides.
+        # Rounded up, never down: a rect a fraction of a pixel short of the text is a rect that elides.
         return [int(math.ceil(fm.horizontalAdvance(label))) + LABEL_SLACK
                 for _, label in STEPS]
 
@@ -135,8 +128,7 @@ class StepBar(QWidget):
     def paintEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         t = style.tokens(self._mode)
         accent = QColor(t["accent"])
-        # The track reads as a rail the nodes sit on, so it stays well below
-        # the nodes in weight rather than competing with them.
+        # The track reads as a rail the nodes sit on, so it stays well below them in weight.
         track = QColor(accent)
         track.setAlpha(90)
 
@@ -150,9 +142,7 @@ class StepBar(QWidget):
         painter.setPen(QPen(track, TRACK_WIDTH, Qt.SolidLine, Qt.RoundCap))
         painter.drawLine(QPointF(xs[0], cy), QPointF(xs[-1], cy))
 
-        # Widths from the painter's own metrics rather than the widget's: the
-        # two disagree across screens with different scale factors, and it is
-        # the painter's that decide whether a label fits the rect it is given.
+        # Widths from the painter's own metrics, not the widget's: the two disagree across scale factors, and it is the painter's that decide whether a label fits.
         fm = painter.fontMetrics()
         widths = [int(math.ceil(fm.horizontalAdvance(label))) + LABEL_SLACK
                   for _, label in STEPS]
@@ -161,8 +151,7 @@ class StepBar(QWidget):
             current = i == self._current
             hovered = i == self._hovered
 
-            # Node. Current is filled solid; the rest are hollow rings over the
-            # window background, which is what makes the track show through.
+            # Node. Current is filled solid; the rest are hollow rings that let the track show through.
             painter.setBrush(QColor(t["accent_deep"]) if current else QColor(t["surface"]))
             if current:
                 painter.setPen(Qt.NoPen)
@@ -172,8 +161,7 @@ class StepBar(QWidget):
                 painter.setPen(QPen(ring, NODE_RING))
             painter.drawEllipse(QPointF(xs[i], cy), NODE_RADIUS, NODE_RADIUS)
 
-            # Label, centred on its node and clamped inside the widget so the
-            # end labels cannot be clipped at a narrow window width.
+            # Label, centred on its node and clamped inside the widget so end labels cannot be clipped.
             text_color = QColor(t["text"] if current or hovered else t["text_muted"])
             painter.setPen(QPen(text_color))
             painter.setBrush(Qt.NoBrush)

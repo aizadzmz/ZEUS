@@ -1,12 +1,5 @@
 """Every DRT run goes to the worker thread, on a snapshot of its input.
 
-Plain TR-RBF used to run inline in the click handler, on the assumption that it
-is the quick method. It is quick only when pyimpspec can assemble the A matrix
-by its Toeplitz shortcut, which needs the sweep's frequencies log-spaced to
-within 1%; a pruned sweep or an instrument writing three-significant-figure
-frequencies misses it and pays 2N**2 numerical integrations instead of 2N --
-tens of seconds per sweep with the window frozen for all of them.
-
 Running off the UI thread leaves the plots live, and the eraser with them, so
 the worker is handed detached copies rather than the sweeps still on screen.
 """
@@ -26,8 +19,7 @@ from core.io_utils import EISDataset
 
 f = np.logspace(4, -1, 30)
 w = 2 * np.pi * f
-# The series inductance is there to give the step's inductive-tail filter
-# something to drop: without it Im(Z) < 0 everywhere and that test is vacuous.
+# The series inductance gives the step's inductive-tail filter something to drop; without it Im(Z) < 0 everywhere and that test is vacuous.
 Z = 10 + 50 / (1 + 1j * w * 5e-3) + 1j * w * 1e-4
 
 
@@ -44,10 +36,8 @@ class Result:
 
 class SyncWorker(QObject):
     """DRTWorker's interface, run inline so the test is deterministic.
-
     Instances land in SyncWorker.spawned, which is what lets a test see the
-    datasets the worker was handed rather than the ones still on screen.
-    """
+    datasets the worker was handed rather than the ones still on screen."""
 
     result_ready = Signal(str, object)
     error = Signal(str, str)

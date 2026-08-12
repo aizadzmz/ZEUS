@@ -1,13 +1,4 @@
-# Save/load an analysis session (datasets + validation + DRT results) as
-# gzipped JSON (.eisz).
-#
-# pyimpspec's result classes (KramersKronigResult, ZHITResult, TRRBFResult,
-# DRTPeaks) have no to_dict()/from_dict(), so this module owns that conversion
-# rather than pickling, which would tie a session to one pyimpspec class
-# layout. Bump SCHEMA_VERSION (with a migration) on any format change.
-#
-# Gzipped rather than plain JSON: numeric arrays compress ~4-5x, and the gzip
-# magic bytes (1f 8b) let load_session still open old plain-JSON sessions.
+# Save/load an analysis session (datasets + validation + DRT results) as gzipped JSON (.eisz); bump SCHEMA_VERSION with a migration on any format change.
 import gzip
 import json
 from pathlib import Path
@@ -26,33 +17,94 @@ _GZIP_MAGIC = b"\x1f\x8b"
 
 
 # ---- shared numeric helpers ----
+# The writer runs with allow_nan=False, so nothing here may hand json a NaN or
+# an infinity: JSON has no spelling for either and json.dumps raises rather than
+# emitting one. They travel as null and are read back as NaN, the same round
+# trip fit_result_to_dict already makes for an unavailable standard error. A
+# result that failed to converge is exactly the one worth saving, so a NaN in it
+# must not be what makes the whole session unsaveable.
+
+
+def _number(value) -> Optional[float]:
+    """One float on its way into the session file, or None where JSON cannot
+    hold it."""
+    value = float(value)
+    return value if np.isfinite(value) else None
+
+
+def _from_number(value) -> float:
+    """The inverse of _number: null comes back as the NaN it stood for."""
+    return float("nan") if value is None else float(value)
+
 
 def _real_array(arr) -> list:
-    return np.asarray(arr).tolist()
+    return [_number(v) for v in np.asarray(arr, dtype=float).tolist()]
+
+
+def _from_real_array(values) -> np.ndarray:
+    # dtype=float, so the nulls _real_array wrote come back as NaN rather than
+    # leaving an object array that no downstream arithmetic can use.
+    return np.asarray([_from_number(v) for v in values], dtype=float)
 
 
 def _complex_array(arr) -> dict:
     arr = np.asarray(arr)
-    return {"re": arr.real.tolist(), "im": arr.imag.tolist()}
+    return {"re": _real_array(arr.real), "im": _real_array(arr.imag)}
 
 
 def _from_complex_array(d: dict) -> np.ndarray:
-    return np.asarray(d["re"]) + 1j * np.asarray(d["im"])
+    return _from_real_array(d["re"]) + 1j * _from_real_array(d["im"])
+
+
+def _jsonable(value):
+    """Coerce a stored parameter dict into something json.dump accepts. These
+    are recorded verbatim from the widgets and are only ever displayed or
+    exported, so a lossy conversion costs nothing -- unlike the result arrays
+    above, which have to survive the round trip intact."""
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, np.ndarray):
+        # Before the sequence check: an ndarray is not a list, and the str()
+        # fallback would quietly turn one into "[1. 2. 3.]".
+        return [_jsonable(v) for v in value.tolist()]
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    # Before the bool/int check below: np.bool_ is not a bool and np.float64 is
+    # not a float, so an unconverted scalar reaches json as an unknown type.
+    if isinstance(value, np.generic):
+        value = value.item()
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return _number(value)
+    return str(value)
 
 
 # ---- datasets ----
 
+# The three numeric lists in DataSet.to_dict(); nulled and restored like every
+# other array here, so one NaN point cannot make a session unsaveable.
+_DATASET_ARRAYS = ("frequencies", "real_impedances", "imaginary_impedances")
+
+
 def dataset_to_dict(ds: EISDataset) -> dict:
+    data_dict = dict(ds.data.to_dict())
+    for key in _DATASET_ARRAYS:
+        if key in data_dict:
+            data_dict[key] = _real_array(data_dict[key])
     return {
         "index": ds.index,
         "source_file": ds.source_file,
         "file_id": ds.file_id,
-        "data": ds.data.to_dict(),
+        "data": data_dict,
     }
 
 
 def dataset_from_dict(d: dict) -> EISDataset:
     data_dict = dict(d["data"])
+    for key in _DATASET_ARRAYS:
+        if key in data_dict:
+            data_dict[key] = _from_real_array(data_dict[key]).tolist()
     mask = data_dict.get("mask")
     if mask:
         # JSON round-trips int dict keys as strings; DataSet expects int keys.
@@ -71,7 +123,7 @@ def dataset_from_dict(d: dict) -> EISDataset:
 def kk_result_to_dict(result: KramersKronigResult) -> dict:
     return {
         "circuit_cdc": result.circuit.serialize(),
-        "pseudo_chisqr": result.pseudo_chisqr,
+        "pseudo_chisqr": _number(result.pseudo_chisqr),
         "frequencies": _real_array(result.frequencies),
         "impedances": _complex_array(result.impedances),
         "residuals": _complex_array(result.residuals),
@@ -82,8 +134,8 @@ def kk_result_to_dict(result: KramersKronigResult) -> dict:
 def kk_result_from_dict(d: dict) -> KramersKronigResult:
     return KramersKronigResult(
         circuit=parse_cdc(d["circuit_cdc"]),
-        pseudo_chisqr=d["pseudo_chisqr"],
-        frequencies=np.asarray(d["frequencies"]),
+        pseudo_chisqr=_from_number(d["pseudo_chisqr"]),
+        frequencies=_from_real_array(d["frequencies"]),
         impedances=_from_complex_array(d["impedances"]),
         residuals=_from_complex_array(d["residuals"]),
         test=d["test"],
@@ -97,7 +149,7 @@ def zhit_result_to_dict(result: ZHITResult) -> dict:
         "frequencies": _real_array(result.frequencies),
         "impedances": _complex_array(result.impedances),
         "residuals": _complex_array(result.residuals),
-        "pseudo_chisqr": result.pseudo_chisqr,
+        "pseudo_chisqr": _number(result.pseudo_chisqr),
         "smoothing": result.smoothing,
         "interpolation": result.interpolation,
         "window": result.window,
@@ -106,10 +158,10 @@ def zhit_result_to_dict(result: ZHITResult) -> dict:
 
 def zhit_result_from_dict(d: dict) -> ZHITResult:
     return ZHITResult(
-        frequencies=np.asarray(d["frequencies"]),
+        frequencies=_from_real_array(d["frequencies"]),
         impedances=_from_complex_array(d["impedances"]),
         residuals=_from_complex_array(d["residuals"]),
-        pseudo_chisqr=d["pseudo_chisqr"],
+        pseudo_chisqr=_from_number(d["pseudo_chisqr"]),
         smoothing=d["smoothing"],
         interpolation=d["interpolation"],
         window=d["window"],
@@ -129,55 +181,50 @@ def trrbf_result_to_dict(result: TRRBFResult) -> dict:
         "frequencies": _real_array(result.frequencies),
         "impedances": _complex_array(result.impedances),
         "residuals": _complex_array(result.residuals),
-        "pseudo_chisqr": result.pseudo_chisqr,
+        "pseudo_chisqr": _number(result.pseudo_chisqr),
         "gammas": _real_array(result.gammas),
         "mean_gammas": _real_array(result.mean_gammas),
         "lower_bounds": _real_array(result.lower_bounds),
         "upper_bounds": _real_array(result.upper_bounds),
-        "lambda_value": result.lambda_value,
+        "lambda_value": _number(result.lambda_value),
     }
 
 
 def trrbf_result_from_dict(d: dict) -> TRRBFResult:
     return TRRBFResult(
-        time_constants=np.asarray(d["time_constants"]),
-        frequencies=np.asarray(d["frequencies"]),
+        time_constants=_from_real_array(d["time_constants"]),
+        frequencies=_from_real_array(d["frequencies"]),
         impedances=_from_complex_array(d["impedances"]),
         residuals=_from_complex_array(d["residuals"]),
-        pseudo_chisqr=d["pseudo_chisqr"],
-        gammas=np.asarray(d["gammas"]),
-        mean_gammas=np.asarray(d["mean_gammas"]),
-        lower_bounds=np.asarray(d["lower_bounds"]),
-        upper_bounds=np.asarray(d["upper_bounds"]),
-        lambda_value=d["lambda_value"],
+        pseudo_chisqr=_from_number(d["pseudo_chisqr"]),
+        gammas=_from_real_array(d["gammas"]),
+        mean_gammas=_from_real_array(d["mean_gammas"]),
+        lower_bounds=_from_real_array(d["lower_bounds"]),
+        upper_bounds=_from_real_array(d["upper_bounds"]),
+        lambda_value=_from_number(d["lambda_value"]),
     )
 
 
 _DRT_KIND = {TRRBFResult: "tr_rbf"}
 _DRT_TO_DICT = {"tr_rbf": trrbf_result_to_dict}
-# Sessions written before the BHT method was dropped may hold a "bht" result.
-# Those kinds are skipped on load (see load_session) rather than migrated:
-# nothing left in the app can plot or export that shape of result.
+# Sessions written before the BHT method was dropped may hold a "bht" result; those kinds are skipped on load rather than migrated.
 _DRT_FROM_DICT = {"tr_rbf": trrbf_result_from_dict}
 
 
 # ---- DRT peaks ----
 
+_DRT_PEAK_FIELDS = (
+    "position", "height", "alpha", "sigma",
+    "x_offset", "x_scale", "y_offset", "y_scale",
+)
+
+
 def drt_peak_to_dict(peak: DRTPeak) -> dict:
-    return {
-        "position": float(peak.position),
-        "height": float(peak.height),
-        "alpha": float(peak.alpha),
-        "sigma": float(peak.sigma),
-        "x_offset": float(peak.x_offset),
-        "x_scale": float(peak.x_scale),
-        "y_offset": float(peak.y_offset),
-        "y_scale": float(peak.y_scale),
-    }
+    return {field: _number(getattr(peak, field)) for field in _DRT_PEAK_FIELDS}
 
 
 def drt_peak_from_dict(d: dict) -> DRTPeak:
-    return DRTPeak(**d)
+    return DRTPeak(**{field: _from_number(d[field]) for field in _DRT_PEAK_FIELDS})
 
 
 def drt_peaks_to_dict(result: DRTPeaks) -> dict:
@@ -190,18 +237,14 @@ def drt_peaks_to_dict(result: DRTPeaks) -> dict:
 
 def drt_peaks_from_dict(d: dict) -> DRTPeaks:
     return DRTPeaks(
-        time_constants=np.asarray(d["time_constants"]),
+        time_constants=_from_real_array(d["time_constants"]),
         peaks=[drt_peak_from_dict(p) for p in d["peaks"]],
         suffix=d["suffix"],
     )
 
 
 # ---- ECM (equivalent circuit fits) ----
-# FitResult holds an lmfit MinimizerResult, which is not JSON-serializable.
-# Only the seven scalars to_statistics_dataframe() reads are stored, handed
-# back via the stand-in class below so that method keeps working on a reloaded
-# session. The covariance matrix, parameter correlations, and the ability to
-# resume or refine the fit do not survive -- refit if you need them.
+# Only the seven scalars to_statistics_dataframe() reads are stored; the covariance matrix and the ability to resume a fit do not survive.
 
 
 class _RestoredMinimizerResult:
@@ -221,17 +264,14 @@ class _RestoredMinimizerResult:
 def fit_result_to_dict(result: FitResult) -> dict:
     m = result.minimizer_result
     return {
-        # serialize(), not to_string(), so the fitted values travel with the
-        # topology and the reloaded circuit reproduces the curve.
+        # serialize(), not to_string(), so the fitted values travel with the topology.
         "circuit_cdc": result.circuit.serialize(),
         "parameters": {
             element: {
                 symbol: {
-                    "value": float(p.value),
-                    # stderr is NaN when the fit produced no covariance matrix
-                    # (see core.ecm.run_ecm_fit); allow_nan=False has no NaN,
-                    # so it travels as None.
-                    "stderr": None if p.stderr != p.stderr else float(p.stderr),
+                    "value": _number(p.value),
+                    # stderr is NaN when the fit produced no covariance matrix, which is what makes it the commonest null in the file.
+                    "stderr": _number(p.stderr),
                     "fixed": bool(p.fixed),
                     "unit": p.unit,
                 }
@@ -242,17 +282,20 @@ def fit_result_to_dict(result: FitResult) -> dict:
         "frequencies": _real_array(result.frequencies),
         "impedances": _complex_array(result.impedances),
         "residuals": _complex_array(result.residuals),
-        "pseudo_chisqr": result.pseudo_chisqr,
+        "pseudo_chisqr": _number(result.pseudo_chisqr),
         "method": result.method,
         "weight": result.weight,
+        # aic/bic go infinite on a perfect fit and redchi is NaN without free
+        # parameters, so these are nulled like every other float here; the three
+        # counts are ints and cannot be.
         "statistics": {
-            "chisqr": m.chisqr,
-            "redchi": m.redchi,
-            "aic": m.aic,
-            "bic": m.bic,
-            "nfree": m.nfree,
-            "ndata": m.ndata,
-            "nfev": m.nfev,
+            "chisqr": _number(m.chisqr),
+            "redchi": _number(m.redchi),
+            "aic": _number(m.aic),
+            "bic": _number(m.bic),
+            "nfree": int(m.nfree),
+            "ndata": int(m.ndata),
+            "nfev": int(m.nfev),
         },
     }
 
@@ -263,8 +306,8 @@ def fit_result_from_dict(d: dict) -> FitResult:
         parameters={
             element: {
                 symbol: FittedParameter(
-                    value=p["value"],
-                    stderr=float("nan") if p["stderr"] is None else p["stderr"],
+                    value=_from_number(p["value"]),
+                    stderr=_from_number(p["stderr"]),
                     fixed=p["fixed"],
                     unit=p["unit"],
                 )
@@ -272,27 +315,23 @@ def fit_result_from_dict(d: dict) -> FitResult:
             }
             for element, params in d["parameters"].items()
         },
-        minimizer_result=_RestoredMinimizerResult(**d["statistics"]),
-        frequencies=np.asarray(d["frequencies"]),
+        minimizer_result=_RestoredMinimizerResult(
+            **{
+                key: value if key in ("nfree", "ndata", "nfev") else _from_number(value)
+                for key, value in d["statistics"].items()
+            }
+        ),
+        frequencies=_from_real_array(d["frequencies"]),
         impedances=_from_complex_array(d["impedances"]),
         residuals=_from_complex_array(d["residuals"]),
-        pseudo_chisqr=d["pseudo_chisqr"],
+        pseudo_chisqr=_from_number(d["pseudo_chisqr"]),
         method=d["method"],
         weight=d["weight"],
     )
 
 
 # ---- UI state ----
-# What _refresh() needs to rebuild a sweep's mask and the automatic filters
-# cannot reconstruct: the eraser's per-point overrides
-# (main_window._manual_masked/_manual_kept) plus the filter widget values.
-# Without these, touching any sidebar control after a reload would derive a
-# different mask than the one saved.
-#
-# Keyed by ds.key since schema v3, so overrides land on the right sweep in a
-# multi-file session (see ui_state_from_dict's v1/v2 fallback). No
-# "source_name" field: main_window rebuilds its file list from the datasets'
-# file_id/source_file.
+# What _refresh() cannot reconstruct: the eraser's per-point overrides plus the filter widget values, keyed by ds.key since schema v3.
 
 def ui_state_to_dict(
     manual_masked: Dict[str, set],
@@ -309,17 +348,7 @@ def ui_state_to_dict(
     drt_subtract_diffusion: bool = False,
     drt_diffusion_cdc: Optional[str] = None,
 ) -> dict:
-    # The advanced mode's fields are optional: a session saved before it
-    # existed has none, and load falls back to the widgets' own defaults. So is
-    # residual_mode, for the same reason -- and a session predating it was
-    # rejected under the modulus convention, which is that default.
-    #
-    # The three drt_* fields are the DRT step's own filters, which are not the
-    # validation step's despite the similar names. They belong here rather than
-    # in drt_params alone: drt_params says what a stored *result* was computed
-    # under, while these are what the widgets must be put back to, and without
-    # them a reloaded session draws an unfiltered spectrum beneath a DRT curve
-    # computed from a filtered one.
+    # The advanced-mode fields and residual_mode are optional, falling back to the widgets' own defaults; the three drt_* fields are the DRT step's filters, not the validation step's.
     return {
         "manual_masked": {key: sorted(idxs) for key, idxs in manual_masked.items()},
         "manual_kept": {key: sorted(idxs) for key, idxs in manual_kept.items()},
@@ -359,9 +388,7 @@ def ui_state_from_dict(d: dict, key_by_label: Optional[Dict[str, str]] = None) -
         "hard_limit": d.get("hard_limit"),
         "max_removed": d.get("max_removed"),
         "residual_mode": d.get("residual_mode"),
-        # Absent in schema v1-v4, where the DRT filters were not saved at all.
-        # False/None is what those sessions were effectively reloaded as, so
-        # the fallback keeps their behaviour rather than guessing.
+        # Absent in schema v1-v4, where the DRT filters were not saved at all; False/None is how those sessions behaved.
         "drt_inductive_filter": d.get("drt_inductive_filter", False),
         "drt_subtract_diffusion": d.get("drt_subtract_diffusion", False),
         "drt_diffusion_cdc": d.get("drt_diffusion_cdc"),
@@ -369,16 +396,7 @@ def ui_state_from_dict(d: dict, key_by_label: Optional[Dict[str, str]] = None) -
 
 
 # ---- whole session ----
-# Result dicts are keyed as main_window.py keys its in-memory caches:
-# validation_results by (method, ds.key); drt_results and drt_peaks by ds.key.
-# ds.key (file_id:index) is unique across files, unlike ds.label ("Set 01").
-# dataset_label is stored alongside dataset_key only for humans reading the
-# raw JSON; reconstruction uses the key alone.
-#
-# validation_params/drt_params hold the effective keyword arguments behind each
-# result (rbf_type, shape_coeff, lambda_value, admittance, ...), without which
-# a reloaded curve cannot be explained or reproduced. Free-form dicts of JSON
-# scalars, keyed like their result.
+# Result dicts are keyed as main_window keys its caches, by ds.key (file_id:index); the *_params dicts hold the effective keyword arguments behind each result.
 
 def save_session(
     path,
@@ -408,7 +426,7 @@ def save_session(
                 "dataset_label": label_by_key.get(key, key),
                 "kind": _VALIDATION_KIND[type(result)],
                 "result": _VALIDATION_TO_DICT[_VALIDATION_KIND[type(result)]](result),
-                "params": validation_params.get((method, key), {}),
+                "params": _jsonable(validation_params.get((method, key), {})),
             }
             for (method, key), result in validation_results.items()
         ],
@@ -418,7 +436,7 @@ def save_session(
                 "dataset_label": label_by_key.get(key, key),
                 "kind": _DRT_KIND[type(result)],
                 "result": _DRT_TO_DICT[_DRT_KIND[type(result)]](result),
-                "params": drt_params.get(key, {}),
+                "params": _jsonable(drt_params.get(key, {})),
             }
             for key, result in drt_results.items()
         ],
@@ -430,19 +448,20 @@ def save_session(
             }
             for key, peaks in drt_peaks.items()
         ],
-        # Keyed by (circuit, sweep) so several candidate circuits fitted to one
-        # sweep all survive (see gui.main_window._ecm_results).
+        # Keyed by (circuit, sweep) so several candidate circuits fitted to one sweep all survive.
         "ecm_results": [
             {
                 "cdc": cdc,
                 "dataset_key": key,
                 "dataset_label": label_by_key.get(key, key),
                 "result": fit_result_to_dict(result),
-                "params": ecm_params.get((cdc, key), {}),
+                "params": _jsonable(ecm_params.get((cdc, key), {})),
             }
             for (cdc, key), result in ecm_results.items()
         ],
-        "ui_state": ui_state or {},
+        # Widget values, so finite in practice -- sanitized anyway, since one
+        # unwritable number here would cost the user the whole session.
+        "ui_state": _jsonable(ui_state or {}),
     }
     payload = json.dumps(session, separators=(",", ":"), allow_nan=False)
     with gzip.open(path, "wt", encoding="utf-8") as f:
@@ -475,9 +494,7 @@ def load_session(
 
     datasets = [dataset_from_dict(d) for d in session["datasets"]]
 
-    # v1/v2 sessions keyed results by "dataset_label" alone, unambiguous
-    # because they held one file's sweeps. Map those back to ds.key; v3+
-    # sessions carry "dataset_key" and skip this.
+    # v1/v2 sessions keyed results by "dataset_label" alone; map those back to ds.key, which v3+ carries directly.
     key_by_label = {ds.label: ds.key for ds in datasets}
 
     def _resolve_key(entry: dict) -> str:
@@ -495,8 +512,7 @@ def load_session(
         for v in session["validation_results"]
     }
 
-    # Unknown kinds are dropped rather than raising: an old session may carry a
-    # "bht" result from when that method existed, and the rest of it still loads.
+    # Unknown kinds are dropped rather than raising, so an old "bht" result does not stop the rest loading.
     drt_entries = [d for d in session["drt_results"] if d["kind"] in _DRT_FROM_DICT]
     drt_results = {
         _resolve_key(d): _DRT_FROM_DICT[d["kind"]](d["result"])

@@ -1,10 +1,8 @@
 """Re-running a validation must be repeatable.
 
 The bug this pins: a run read the dataset's mask as the last redraw left it,
-which included that redraw's threshold rejections. So the result was fitted on
-fewer points than `pruned_points` accounted for, _refresh could not reproduce
-the point set, and every later run reported the result as stale -- permanently,
-since each run then started from a different mask again.
+so the result was fitted on fewer points than `pruned_points` accounted for,
+and every later run reported the result as stale -- permanently.
 """
 import os
 
@@ -29,8 +27,7 @@ f = np.logspace(4, -1, 30)
 w = 2 * np.pi * f
 Z_true = 10 + 50 / (1 + 1j * w * 5e-3)
 
-# Two sweeps' worth of frequencies the stub runner will fit badly, picked by
-# value so they survive the masking that goes on between passes.
+# Two sweeps' worth of frequencies the stub runner will fit badly, picked by value so they survive the masking between passes.
 BAD_FREQUENCIES = {float(f[5]), float(f[9])}
 
 
@@ -146,8 +143,7 @@ def test_advanced_rerun_stays_consistent_after_switching_convention(win):
     later = _observed(win, 3)
     assert win.warning_label.text() == "", win.warning_label.text()
 
-    # Every run saw the same input: the filtered data, not the last redraw's
-    # leftovers. This is the assertion that fails without the fix.
+    # Every run saw the same input -- the filtered data, not the last redraw's leftovers. This is the assertion that fails without the fix.
     assert set(first + later) == {len(f)}, first + later
 
 

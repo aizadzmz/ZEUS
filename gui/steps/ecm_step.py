@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPlainTextEdit,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QToolButton,
     QVBoxLayout,
@@ -29,6 +30,7 @@ from gui.steps.base import (
     StepPage,
     add_combo_items,
     compact_combo,
+    group_box,
     group_form,
     quiet_group,
     section_label,
@@ -43,12 +45,7 @@ def _label_for(value: str) -> str:
 
 
 class ECMStep(StepPage):
-    # No Singular/Multiple toggle: this step always pages one sweep at a time.
-    # The circuit diagram carries one sweep's fitted values and the report
-    # below it one sweep's parameters, so overlaying the whole selection
-    # offered a comparison only the top plot could actually make -- the
-    # diagram would still have been showing whichever sweep came first.
-    # "Fit circuit" is unaffected; it has always run on the whole selection.
+    # No Singular/Multiple toggle: this step pages one sweep at a time, since the diagram and report below carry one sweep's values. "Fit circuit" still runs on the whole selection.
     fixed_display_mode = "Single"
 
     def __init__(self, selection: SweepSelection, parent: Optional[QWidget] = None):
@@ -145,15 +142,39 @@ class ECMStep(StepPage):
         self.run_button.setProperty("variant", "primary")
         form.addRow(self.run_button)
 
-        # No circuit picker: the step shows the circuit in the code box above
-        # and nothing else, so guessing your way through a dozen of them does
-        # not leave a dozen on screen. Earlier fits stay cached and come back
-        # when their circuit is typed in again.
+        # No circuit picker: the step shows the circuit in the code box and nothing else, so a dozen guesses do not leave a dozen on screen. Earlier fits stay cached.
         self.shown_status_label = QLabel()
         self.shown_status_label.setWordWrap(True)
         self.shown_status_label.setProperty("state", "muted")
         form.addRow(self.shown_status_label)
         self.add_settings(ecm_box)
+
+        # Between the settings and the exports, and given the column's spare
+        # height: the fit report is the answer this step produces, so it reads
+        # beside the settings that produced it rather than under the schematic.
+        stats_box, stats_layout = group_box(
+            "Fit Statistics",
+            "Goodness-of-fit figures and the fitted parameter values for the "
+            "sweep on screen.",
+        )
+        # Overriding _section's Maximum policy, the one card here meant to grow.
+        stats_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.params_text = QPlainTextEdit()
+        self.params_text.setReadOnly(True)
+        self.params_text.setProperty("role", "output")
+        # Fixed-pitch: the fit report is pre-aligned text.
+        self.params_text.setFont(style.mono_font())
+        # A floor, not a cap: the report takes what the column has left and
+        # scrolls itself, so a long one never pushes the exports off-panel.
+        # Ignored, so the column is sized from the settings above it and this
+        # takes the remainder -- a QPlainTextEdit's own size hint is several
+        # hundred pixels and would force the scrollbar this move is undoing.
+        self.params_text.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+        self.params_text.setMinimumHeight(120)
+        # stretch, because QSizePolicy.Ignored carries no ExpandFlag: without it
+        # the card's spare height is split with its title label.
+        stats_layout.addWidget(self.params_text, stretch=1)
+        self.add_settings(stats_box, stretch=1)
 
         export_box, export_layout = quiet_group()
         self.export_params_button = QPushButton("Export ECM parameters…")
@@ -168,7 +189,8 @@ class ECMStep(StepPage):
         export_layout.addWidget(self.export_image_button)
         self.add_settings(export_box)
 
-        self.end_settings()
+        # No end_settings(): the statistics card above already holds the slack,
+        # which keeps the exports pinned to the bottom of the panel.
 
         # ----------------------------------------------------------- content
 
@@ -183,22 +205,10 @@ class ECMStep(StepPage):
         self.pager = SweepPager(selection)
         lower_col.addWidget(self.pager)
 
-        circuit_splitter = QSplitter(Qt.Vertical)
+        # The schematic has the whole lower half now that the report has moved
+        # into the settings column, so no splitter divides it.
         self.circuit_pane = self._build_circuit_pane()
-        self.params_text = QPlainTextEdit()
-        self.params_text.setReadOnly(True)
-        self.params_text.setProperty("role", "output")
-        # Fixed-pitch: the fit report is pre-aligned text.
-        self.params_text.setFont(style.mono_font())
-        circuit_splitter.addWidget(self.circuit_pane)
-        circuit_splitter.addWidget(self.params_text)
-        circuit_splitter.setStretchFactor(0, 3)
-        circuit_splitter.setStretchFactor(1, 2)
-        # Pixels, not ratios -- setSizes takes real heights.
-        circuit_splitter.setSizes([280, 180])
-        # Non-collapsible: a pane dragged shut looks like lost content.
-        circuit_splitter.setChildrenCollapsible(False)
-        lower_col.addWidget(circuit_splitter, stretch=1)
+        lower_col.addWidget(self.circuit_pane, stretch=1)
         splitter.addWidget(lower)
 
         splitter.setStretchFactor(0, 1)
@@ -207,10 +217,7 @@ class ECMStep(StepPage):
         splitter.setChildrenCollapsible(False)
         self.add_content(splitter, stretch=1)
 
-        # Signals blocked: letting textChanged fire here would call
-        # validate_cdc -> parse_cdc and pay the ~4 s pyimpspec import while the
-        # window is still being built. Validation runs on the first edit
-        # instead, by which point gui/app.py's warm-up has made it free.
+        # Signals blocked: letting textChanged fire here would call parse_cdc and pay the ~4 s pyimpspec import while the window is still being built.
         self.cdc_edit.blockSignals(True)
         self.cdc_edit.setText(CIRCUIT_PRESETS[0][1])
         self.cdc_edit.blockSignals(False)

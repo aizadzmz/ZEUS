@@ -1,10 +1,8 @@
 """Each step's Singular/Multiple toggle, and the one step that has none.
 
 The ECM step was fixed on Singular rather than given a toggle: its circuit
-diagram carries one sweep's fitted values and the report below it one sweep's
-parameters, so Multiple offered a comparison only the top plot could make.
-Removing a control every step was assumed to have is what these cover -- the
-wiring, the mode lookup, and the pager that used to appear only in Singular.
+diagram and parameter report each describe one sweep, so Multiple offered a
+comparison only the top plot could make.
 """
 import os
 

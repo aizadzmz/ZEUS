@@ -1,11 +1,7 @@
 """An editable tree standing in for a circuit description code.
 
-The circuit canvas needs something it can point at and mutate; a CDC string is
-not that, and pyimpspec's Circuit is built for evaluation. This parses a CDC
-into plain dataclasses, edits those, and serializes back through pyimpspec so
-the CDC stays the app's source of truth.
-
-pyimpspec is imported per-function, as in core/ecm.py, to keep it off start-up.
+A CDC is parsed into plain dataclasses, those are edited, and the result is
+serialized back through pyimpspec, so the CDC stays the app's source of truth.
 """
 from __future__ import annotations
 
@@ -14,8 +10,7 @@ from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Dict, Iterator, List, Optional, Tuple, Union
 
-# Per-process only, never serialized: it exists so a click can name the node it
-# landed on. Re-parsing a CDC hands out fresh ids.
+# Per-process only, never serialized: it exists so a click can name the node it hit.
 _next_id = count(1).__next__
 
 
@@ -29,8 +24,7 @@ class ElementNode:
     upper: Dict[str, float] = field(default_factory=dict)
     fixed: Dict[str, bool] = field(default_factory=dict)
     label: str = ""
-    # Container elements hold whole connections as parameters; carried through
-    # verbatim, since the schematic draws them as one opaque box.
+    # Container elements hold whole connections; carried through as one opaque box.
     subcircuits: Dict[str, object] = field(default_factory=dict)
     node_id: int = field(default_factory=_next_id)
 
@@ -110,8 +104,7 @@ def from_cdc(cdc: str) -> ConnectionNode:
 
 def from_circuit(circuit) -> ConnectionNode:
     """As from_cdc, for an already-parsed Circuit -- e.g. a fit result's."""
-    # A Circuit always reports exactly one outermost Series, the implicit square
-    # brackets of the CDC. core/circuit_diagram.py walks the same way.
+    # A Circuit always reports one outermost Series, the CDC's implicit brackets.
     return _node_from(circuit.get_connections(recursive=False)[0])
 
 
@@ -142,8 +135,7 @@ def to_circuit(root: ConnectionNode):
     from pyimpspec import Circuit, Series
 
     connection = _connection_from(root)
-    # Circuit's contract is an outermost Series; a root that somehow is not one
-    # gets wrapped rather than rejected.
+    # Circuit's contract is an outermost Series; a root that is not one gets wrapped.
     if not isinstance(connection, Series):
         connection = Series([connection])
     return Circuit(connection)
@@ -212,8 +204,7 @@ def element_count(root: ConnectionNode) -> int:
 
 
 # ------------------------------------------------------------- edit actions
-# Each action returns a new root, so undo is a stack of past CDC strings and a
-# failed edit cannot leave a half-modified tree behind.
+# Each action returns a new root, so a failed edit cannot leave a half-modified tree behind.
 
 
 def _rebuilt(root: ConnectionNode) -> Tuple[ConnectionNode, Dict[int, Node]]:

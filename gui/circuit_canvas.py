@@ -16,15 +16,12 @@ from PySide6.QtWidgets import (
 
 from gui import style
 
-# Clamp on how far a small circuit is blown up to fill a wide pane, matching
-# gui/figure_panes.py's MAX_DIAGRAM_SCALE.
+# Clamp on how far a small circuit is blown up to fill a wide pane, matching gui/figure_panes.py's MAX_DIAGRAM_SCALE.
 MAX_SCALE = 1.6
 # Radius of an insertion badge, in device pixels.
 BADGE_RADIUS = 9.0
 
-# Element menu, grouped so the long tail of diffusion and composite elements
-# does not bury the four that account for nearly every circuit. Anything the
-# registry offers that is not listed here lands under "Other".
+# Element menu, grouped so the long tail of diffusion and composite elements does not bury the common four; anything unlisted lands under "Other".
 ELEMENT_GROUPS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("Basic", ("R", "C", "L", "Q")),
     ("Diffusion", ("W", "Ws", "Wo", "G", "Gs")),

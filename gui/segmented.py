@@ -24,8 +24,7 @@ class SegmentedControl(QWidget):
 
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        # Zero spacing makes the segments read as one control; the shared
-        # borders are collapsed in QSS.
+        # Zero spacing makes the segments read as one control; the shared borders are collapsed in QSS.
         row.setSpacing(0)
 
         self._group = QButtonGroup(self)
@@ -38,9 +37,7 @@ class SegmentedControl(QWidget):
             button.setText(label)
             button.setCheckable(True)
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            # Qt style sheets have no :first-child/:last-child, so the end a
-            # segment sits on is carried as a property, for the rounded corners
-            # to land on the outer edges only.
+            # Qt style sheets have no :first-child/:last-child, so the end a segment sits on is carried as a property for the rounded corners.
             button.setProperty("seg", "first" if i == 0 else "last" if i == last else "mid")
             self._group.addButton(button, i)
             self._buttons.append(button)

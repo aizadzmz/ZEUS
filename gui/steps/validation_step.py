@@ -57,8 +57,7 @@ class ValidationStep(StepPage):
         self.inductive_check = QCheckBox("Remove inductive tail (Im(Z) > 0)")
         filter_layout.addWidget(self.inductive_check)
 
-        # The eraser lives on the plot overlay, not here: it locks this column
-        # while it is on, so its own switch cannot sit inside it.
+        # The eraser lives on the plot overlay, not here: it locks this column, so its own switch cannot sit inside it.
         eraser_hint = QLabel(
             "Point-by-point edits: use the Eraser button on the spectrum."
         )
@@ -72,8 +71,7 @@ class ValidationStep(StepPage):
             "Kramers-Kronig or Z-HIT.",
         )
         method = SegmentedControl(["Kramers-Kronig", "Z-HIT"])
-        # Named *_radio though they are QToolButtons: same QAbstractButton
-        # API, and MainWindow._wire_steps reaches them by these names.
+        # Named *_radio though they are QToolButtons: same QAbstractButton API, and MainWindow._wire_steps reaches them by these names.
         self.kk_radio = method.button(0)
         self.zhit_radio = method.button(1)
         valid_form.addRow("Method", method)
@@ -120,9 +118,7 @@ class ValidationStep(StepPage):
         )
         valid_form.addRow("Max removed", self.max_removed_spin)
 
-        # Last of the settings the run reads, and directly under the limits it
-        # governs: whichever convention is picked here is the one they reject
-        # on, whether that is the Basic threshold or the Advanced pair above.
+        # Last of the settings the run reads, and directly under the limits it governs: whichever convention is picked here is the one they reject on.
         definition = SegmentedControl(["ΔZ / |Z|", "ΔZ′ / Z′"])
         self.residual_modulus_radio = definition.button(0)
         self.residual_modulus_radio.setToolTip(
@@ -139,8 +135,7 @@ class ValidationStep(StepPage):
         self.run_validation_button.setProperty("variant", "primary")
         valid_form.addRow(self.run_validation_button)
 
-        # Outputs, so they sit below the action that produces them rather than
-        # between the settings and the button. Empty until a run reports back.
+        # Outputs, so they sit below the action that produces them; empty until a run reports back.
         self.prune_status_label = QLabel()
         self.prune_status_label.setWordWrap(True)
         self.prune_status_label.setProperty("state", "muted")
@@ -155,8 +150,7 @@ class ValidationStep(StepPage):
         self.basic_radio.toggled.connect(self._sync_mode_rows)
         self._sync_mode_rows()
 
-        # Kept ordered at the widget, so prune_iteratively can treat soft > hard
-        # as the programming error it would be rather than a user typo.
+        # Kept ordered at the widget, so prune_iteratively can treat soft > hard as the programming error it would be.
         self.soft_limit_spin.valueChanged.connect(self.hard_limit_spin.setMinimum)
         self.hard_limit_spin.valueChanged.connect(self.soft_limit_spin.setMaximum)
         self._clamp_limits()
@@ -177,9 +171,7 @@ class ValidationStep(StepPage):
         self.end_settings()
 
         # ----------------------------------------------------------- content
-        #
-        # A splitter, not fixed halves: Multiple view collapses the residuals
-        # pane outright and gives the spectrum the whole height.
+        # A splitter, not fixed halves: Multiple view collapses the residuals pane outright and gives the spectrum the whole height.
         self.splitter = QSplitter(Qt.Vertical)
         self.spectrum_pane = PgFigurePane(with_overlay_actions=True, with_eraser=True)
         self.splitter.addWidget(self.spectrum_pane)
@@ -196,16 +188,12 @@ class ValidationStep(StepPage):
 
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
-        # Pixels, not ratios -- setSizes takes real heights. Only the opening
-        # split: the residual figure claims no minimum of its own, so dragging
-        # the handle resizes it rather than pushing it under a scrollbar.
+        # Pixels, not ratios -- setSizes takes real heights. Only the opening split: the residual figure claims no minimum of its own.
         self.splitter.setSizes([560, 380])
         self.splitter.setChildrenCollapsible(False)
         self.add_content(self.splitter, stretch=1)
 
-        # Everything on this page except the spectrum, for the eraser lock:
-        # paging to another sweep or reading residuals is "the rest of the
-        # work", and waits until the eraser is switched off.
+        # Everything on this page except the spectrum, for the eraser lock: paging or reading residuals waits until the eraser is off.
         self.lock_with_settings(lower)
 
     @property
@@ -229,8 +217,7 @@ class ValidationStep(StepPage):
     def residual_mode(self) -> str:
         """One of core.validation.RESIDUAL_MODES: what the limits above and the
         residual plot below both measure a point against."""
-        # Deferred: core.validation drags in pyimpspec, and this step is built
-        # during startup, before any analysis has been asked for.
+        # Deferred: core.validation drags in pyimpspec, and this step is built during startup.
         from core.validation import RESIDUAL_BY_COMPONENT, RESIDUAL_BY_MODULUS
 
         return (
@@ -269,9 +256,7 @@ class ValidationStep(StepPage):
         )
         for spin in spins:
             spin.blockSignals(True)
-        # Widened before any of them is set: soft and hard pen each other in, so
-        # a saved pair below the current one would otherwise be clipped up
-        # against the values it is replacing.
+        # Widened before any of them is set: soft and hard pen each other in, so a saved pair below the current one would be clipped.
         self.soft_limit_spin.setMaximum(100.0)
         self.hard_limit_spin.setMinimum(0.0)
         for value, spin in zip((threshold, soft, hard, max_removed), spins):

@@ -16,8 +16,7 @@ from pyimpspec import DataSet
 from core.io_utils import EISDataset
 from core.plotting import _elide_entry, _GroupHeader, build_nyquist_plot
 
-# Two batch exports sharing a long prefix and differing near the end -- the
-# case that makes plain right-eliding useless.
+# Two batch exports sharing a long prefix and differing near the end -- the case that makes plain right-eliding useless.
 STEM_A = "LGM50LT EIS CALIBRATION_C01"
 STEM_B = "LGM50LT EIS CALIBRATION_C01_part2_DRIFT_REP_BAND_01_MB_C01"
 
@@ -196,8 +195,7 @@ def test_the_name_stops_at_the_character_cap(app):
     assert all(len(text) <= _GroupHeader.MAX_NAME_CHARS + 1 for text in _headers(widget))
 
 
-# Wide enough that the character cap binds rather than the pixel budget --
-# past the crossover for any plausible label font.
+# Wide enough that the character cap binds rather than the pixel budget.
 ROOMY, ROOMIER = 2200, 3200
 
 

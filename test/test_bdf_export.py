@@ -216,8 +216,7 @@ def test_every_column_is_a_recognized_bdf_term(tmp_path, dataset):
     # validate=False so we can inspect the report rather than take the raise.
     frame = bdf.read(str(path), validate=False)
 
-    # The file is well-formed BDF CSV: the reference reader recovers every row
-    # and column, with the values intact.
+    # The file is well-formed BDF CSV: the reference reader recovers every row and column, values intact.
     assert len(frame) == 40
     assert list(frame.columns) == [label for _, label in BDF_COLUMNS]
     assert np.allclose(frame["Frequency / Hz"].to_numpy(), dataset.frequencies)

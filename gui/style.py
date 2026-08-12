@@ -8,12 +8,10 @@ from typing import Dict
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication, QWidget
 
-# Navy: the deep end of the accent ramp, behind anything the accent fills.
-# Text takes the lighter `accent` instead -- navy reads as black at body size.
+# Navy: the deep end of the accent ramp, behind anything the accent fills. Text takes the lighter `accent`, navy reading as black at body size.
 ACCENT = "#000080"
 
 # --------------------------------------------------------------- spacing
-#
 # A 4px base step, named for the use site so call sites read as intent.
 
 PANEL_MARGINS = (12, 12, 12, 12)   # around a step's settings column
@@ -31,15 +29,11 @@ PAGER_ARROW_GAP = 10               # sweep pager: `‹‹ ‹ | › ››`, spl
 
 RADIUS = 6
 
-# Height cap for read-only text panes, which would otherwise grow unbounded in
-# a scroll area and push everything below off-screen. They keep their own
-# scrollbars, so nothing becomes unreachable.
+# Height cap for read-only text panes, which would otherwise grow unbounded in a scroll area; they keep their own scrollbars.
 TEXT_PANE_MAX_HEIGHT = 130
 
 # ------------------------------------------------------------------ type
-#
-# qdarktheme's stylesheet sets no font-family or font-size, so setting the
-# application font here is safe and will not be overridden.
+# qdarktheme's stylesheet sets no font-family or font-size, so the application font set here is not overridden.
 
 FONT_PT_BASE = 10.0
 FONT_PT_SMALL = 9.0      # status lines, pager metadata, figure notes
@@ -83,21 +77,15 @@ def mono_font() -> QFont:
 
 
 # ---------------------------------------------------------------- colors
-#
-# The accent is a ramp: subtle (washes) -> soft (hovers) -> border (hairlines)
-# -> accent (text and strokes) -> deep (anything filled). Dark mode inverts the
-# deep end. The split at the top of the ramp is the rule: navy fills, medium
-# blue writes.
+# The accent is a ramp: subtle (washes) -> soft (hovers) -> border (hairlines) -> accent (text and strokes) -> deep (fills), with dark mode inverting the deep end.
 
 _LIGHT: Dict[str, str] = {
     "text": "#252931",
     "text_muted": "#708090",   # slate
     "surface": "#ffffff",
-    # Blue-tinted rather than neutral grey, so the settings column reads as the
-    # accent's side of the window before a single control is styled.
+    # Blue-tinted rather than neutral grey, so the settings column reads as the accent's side of the window.
     "surface_alt": "#f4f7fc",
-    # Neutral and slightly sunken, for read-only output panes. Deliberately not
-    # blue: output should sit back from the tinted inputs around it.
+    # Neutral and slightly sunken, for read-only output panes: output should sit back from the tinted inputs.
     "surface_sunken": "#f5f5f5",
     "border": "#dfe3e8",
     "accent_subtle": "#eceff9",
@@ -126,8 +114,7 @@ _DARK: Dict[str, str] = {
     "accent_subtle": "#1b2033",
     "accent_soft": "#26304d",
     "accent_border": "#3d4a72",
-    # ACCENT is too dark to read against the dark background, so dark mode uses
-    # a lightened navy of the same hue family instead.
+    # ACCENT is too dark to read against the dark background, so dark mode uses a lightened navy of the same hue.
     "accent": "#8fa2e6",
     "accent_deep": "#a8b6ee",
     "accent_hover": "#bcc7f2",

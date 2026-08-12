@@ -1,7 +1,6 @@
 """Main window: a step bar across the top, one page per stage below it."""
 
-# Annotations are strings, so signatures can name core.* types without
-# importing those modules here.
+# Annotations are strings, so signatures can name core.* types without importing those modules.
 from __future__ import annotations
 
 from collections import defaultdict
@@ -26,16 +25,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# Do not import core.* at module level: they pull in pyimpspec (~4 s) which is
-# not needed to show a window. Import inside each use site instead; gui/app.py
-# warms them on a background thread so those imports are no-ops by then.
+# Do not import core.* at module level: they pull in pyimpspec (~4 s), which is not needed to show a window. Import inside each use site instead.
 if TYPE_CHECKING:  # names used only in annotations
     from core import EISParseError
 
 from gui import style
 from gui.generic_import_dialog import GenericImportDialog
-# Safe at module scope: core.plotting needs only numpy and pyqtgraph, both of
-# which gui/app.py warms before importing this module.
+# Safe at module scope: core.plotting needs only numpy and pyqtgraph, both warmed by gui/app.py.
 from core.plotting import DEFAULT_LINE_WIDTH, DEFAULT_MARKER_SIZE
 from gui.selection import SweepSelection
 from gui.steps.base import (
@@ -53,15 +49,12 @@ from gui.workers import DRTWorker, ECMWorker, ValidationWorker
 
 VALIDATION_METHODS = ("Kramers-Kronig", "Z-HIT")
 
-# How many diffusion fits to keep. Sized to hold a large batch several times
-# over, since a redraw must not evict what the same redraw is about to read;
-# at ~20 KB an entry this is a few megabytes at worst.
+# How many diffusion fits to keep. Sized to hold a large batch several times over, since a redraw must not evict what the same redraw is about to read.
 MAX_DIFFUSION_FITS = 512
 
 # Circuit edits kept for undo, as CDC snapshots.
 MAX_CIRCUIT_UNDO = 50
-# Significant figures written into the CDC field by a canvas edit. Enough for a
-# starting guess, and short enough that the code stays readable.
+# Significant figures written into the CDC field by a canvas edit: enough for a starting guess, short enough to stay readable.
 CIRCUIT_CDC_DECIMALS = 6
 ICON_PATH = Path(__file__).resolve().parent / "assets" / "icon.ico"
 
@@ -107,23 +100,18 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(QIcon(str(ICON_PATH)))
         self.resize(1200, 800)
 
-        # Loaded files, and the flat list of every sweep across them. To find
-        # a sweep's file use ds.file_id, not list position.
+        # Loaded files, and the flat list of every sweep across them. To find a sweep's file use ds.file_id, not list position.
         self._files: List[LoadedFile] = []
         self._datasets: List = []
-        # Active/on-screen sweeps (see gui.selection). Built before the
-        # widgets, which bind to it in _build_ui.
+        # Active/on-screen sweeps (see gui.selection); built before the widgets, which bind to it in _build_ui.
         self._selection = SweepSelection(self)
         # Never reused, so a removed file's keys cannot collide with a new one.
         self._next_file_id = 0
-        # {(method, ds.key): KramersKronigResult | ZHITResult}. All caches here
-        # key on ds.key, not ds.label -- labels like "Set 01" repeat across files.
+        # {(method, ds.key): KramersKronigResult | ZHITResult}. Every cache here keys on ds.key, not ds.label, which repeats across files.
         self._validation_results = {}
-        # {(method, ds.key): effective kwargs} -- saved with the result so a
-        # reloaded session can reproduce it; see core.session for the schema.
+        # {(method, ds.key): effective kwargs} -- saved with the result so a reloaded session can reproduce it.
         self._validation_params: Dict[Tuple[str, str], dict] = {}
-        # {ds.key: point indices} -- eraser overrides. Kept out of the DataSet
-        # mask, which _refresh() rebuilds from the filters; re-applied as a layer.
+        # {ds.key: point indices} -- eraser overrides, kept out of the DataSet mask and re-applied as a layer.
         self._manual_masked: Dict[str, set] = {}
         self._manual_kept: Dict[str, set] = {}
         self._worker: Optional[ValidationWorker] = None
@@ -138,32 +126,20 @@ class MainWindow(QMainWindow):
         self._drt_params: Dict[str, dict] = {}
         # {ds.key: DRTPeaks}
         self._drt_peaks = {}
-        # {(ds.key, cdc, masked indices): (impedances, FitResult) or (None, msg)}
-        # -- the DRT step's diffusion subtraction, which costs a CNLS fit per
-        # sweep and is re-applied on every redraw. Keyed by the mask too, so an
-        # eraser edit or a prune refits rather than subtracting a stale tail.
+        # {(ds.key, cdc, masked indices): (impedances, FitResult) or (None, msg)}; keyed by the mask too, so an eraser edit refits rather than reusing a stale tail.
         self._diffusion_fits: Dict[tuple, tuple] = {}
-        # {ds.key: FitResult or the message a failed fit left}, rebuilt by
-        # _diffusion_applied for whichever sweeps it last ran over. Scoped to
-        # the screen: it answers "what does the readout describe", and only
-        # the sweeps currently drawn are in it.
+        # {ds.key: FitResult or a failed fit's message}, rebuilt by _diffusion_applied and scoped to the screen: it answers what the readout describes.
         self._diffusion_shown: Dict[str, object] = {}
         self._drt_worker: Optional[DRTWorker] = None
         self._drt_worker_errors: List[Tuple[str, str]] = []
-        # Settings for the batch in flight: result_ready carries only
-        # (label, result), so _on_drt_worker_result reads them from here.
+        # Settings for the batch in flight: result_ready carries only (label, result), so _on_drt_worker_result reads them from here.
         self._pending_drt_params: dict = {}
-        # The same, per sweep: {ds.key: FitResult or message} as the batch was
-        # fitted, frozen at _start_drt_run. Scoped to the run, which is why it
-        # is not _diffusion_shown -- that one follows the screen, and a batch
-        # outlives any one draw.
+        # The same, per sweep: {ds.key: FitResult or message} frozen at _start_drt_run, and so scoped to the run rather than to the screen.
         self._pending_diffusion: Dict[str, object] = {}
-        # What the batch in flight is called and how many sweeps it covers,
-        # kept for the summary _on_drt_worker_finished shows once it ends.
+        # What the batch in flight is called and how many sweeps it covers, for the summary shown once it ends.
         self._drt_run_name = "DRT"
         self._drt_run_total = 0
-        # {(canonical cdc, ds.key): FitResult}. Keyed by circuit as well as
-        # sweep, so fitting a second circuit keeps the first one's result.
+        # {(canonical cdc, ds.key): FitResult}, keyed by circuit as well as sweep so a second circuit keeps the first one's result.
         self._ecm_results: Dict[Tuple[str, str], object] = {}
         # {(canonical cdc, ds.key): effective kwargs}
         self._ecm_params: Dict[Tuple[str, str], dict] = {}
@@ -171,18 +147,13 @@ class MainWindow(QMainWindow):
         self._ecm_shown_cdc: Optional[str] = None
         self._ecm_worker: Optional[ECMWorker] = None
         self._ecm_worker_errors: List[Tuple[str, str]] = []
-        # Marker & line style, edited through gui/marker_style_dialog.py. The
-        # per-file shapes are keyed by file_id and outlive a file being closed,
-        # so reopening it in the same session keeps its shape; a file with no
-        # entry falls back to its position in the default cycle.
+        # Marker & line style, edited through gui/marker_style_dialog.py. Per-file shapes are keyed by file_id and outlive a file being closed; a file with no entry falls back to the default cycle.
         self._file_markers: Dict[int, str] = {}
         self._marker_size = DEFAULT_MARKER_SIZE
         self._line_width = DEFAULT_LINE_WIDTH
         # As _pending_drt_params, plus the canonical CDC the cache key needs.
         self._pending_ecm: dict = {}
-        # The editable circuit behind the canvas. Derived from the CDC field,
-        # which stays the source of truth; _ecm_syncing marks writes that came
-        # from the canvas, so the tree is not rebuilt from its own output.
+        # The editable circuit behind the canvas, derived from the CDC field, which stays the source of truth; _ecm_syncing marks writes that came from the canvas.
         self._ecm_tree = None
         self._ecm_syncing = False
         self._ecm_undo: List[str] = []
@@ -190,30 +161,26 @@ class MainWindow(QMainWindow):
         self._ecm_editor = None
         # What the canvas currently shows, so a redundant redraw can be skipped.
         self._ecm_drawn = None
-        # textChanged fires per keystroke, and the ECM overlay/report follow the
-        # code box; coalesce so only the settled text costs a rebuild.
+        # textChanged fires per keystroke and the ECM overlay/report follow the code box, so coalesce until the text settles.
         self._ecm_display_timer = QTimer(self)
         self._ecm_display_timer.setSingleShot(True)
         self._ecm_display_timer.setInterval(250)
         self._ecm_display_timer.timeout.connect(self._refresh_ecm_display)
-        # Steps replot lazily: _refresh() does the cheap masking/validity
-        # bookkeeping and marks every step dirty, but only the visible step
-        # redraws. Switching steps renders whichever was left dirty.
+        # Steps replot lazily: _refresh() does the cheap bookkeeping and marks every step dirty, but only the visible step redraws.
         self._pending: Optional[dict] = None
         self._step_dirty: set = set()
-        # Spectrum framing handed between steps, so Nyquist panning survives
-        # moving to the next step. See _on_step_changed.
+        # Spectrum framing handed between steps, so Nyquist panning survives moving to the next step.
         self._spectrum_view_state = None
-        # Guards the settings-width mirror from re-entering itself while it
-        # pushes the new width onto the other three steps.
+        # Which step that framing is read off when the next one opens; the stack reports the step being *entered*, not the one being left.
+        self._step_index = 0
+        # Guards the settings-width mirror from re-entering itself while it pushes the new width onto the other three steps.
         self._syncing_panel_width = False
         # splitterMoved fires continuously through a drag; coalesce the writes.
         self._panel_width_save_timer = QTimer(self)
         self._panel_width_save_timer.setSingleShot(True)
         self._panel_width_save_timer.setInterval(300)
         self._panel_width_save_timer.timeout.connect(self._save_settings_width)
-        # Width for every step's settings column; restored from QSettings
-        # once the steps exist (see _restore_settings_width).
+        # Width for every step's settings column; restored from QSettings once the steps exist.
         self._panel_width = DEFAULT_SETTINGS_WIDTH
 
         self._settings = QSettings()
@@ -223,8 +190,7 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_ui()
 
-        # Apply the theme once the widgets exist, then reflect the current
-        # mode in the menu without re-triggering the toggle handler.
+        # Apply the theme once the widgets exist, then reflect the mode in the menu without re-triggering the toggle handler.
         apply_theme(self._theme_mode)
         self.step_bar.set_theme_mode(self._theme_mode)
         self.data_viz_step.files_panel.set_theme_mode(self._theme_mode)
@@ -264,8 +230,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.export_bdf_action)
 
-        # One QAction backs the menu item, the status-bar button, and the
-        # shortcut, so their checked states stay in sync automatically.
+        # One QAction backs the menu item, the status-bar button and the shortcut, so their checked states stay in sync.
         self.dark_action = QAction("Dark mode", self, checkable=True)
         self.dark_action.setShortcut("Ctrl+D")
         self.dark_action.setStatusTip("Toggle between light and dark themes (Ctrl+D)")
@@ -274,8 +239,7 @@ class MainWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         view_menu.addAction(self.dark_action)
 
-        # Shares the menu action, so it stays in sync with it and Ctrl+D.
-        # addPermanentWidget docks bottom-right; addWidget for bottom-left.
+        # Shares the menu action, so it stays in sync with it and Ctrl+D; addPermanentWidget docks bottom-right.
         theme_button = QToolButton()
         theme_button.setDefaultAction(self.dark_action)
         theme_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
@@ -292,8 +256,7 @@ class MainWindow(QMainWindow):
         self.step_bar.step_selected.connect(self._on_step_selected)
         root.addWidget(self.step_bar)
 
-        # Says why the window has gone dead, and how to get it back. Its own
-        # label rather than the warning banner below, which _refresh() owns.
+        # Says why the window has gone dead, and how to get it back; its own label rather than the warning banner _refresh() owns.
         self.eraser_banner = QLabel(
             "Eraser on — the rest of the window is locked. Click points on the "
             "spectrum to remove or restore them, then switch the Eraser button "
@@ -317,8 +280,7 @@ class MainWindow(QMainWindow):
         self.ecm_step = ECMStep(self._selection)
 
         self.step_stack = QStackedWidget()
-        # Order must match gui.stepper.STEPS -- StepBar.index_of maps between
-        # them, and _render_active_step branches on the page index.
+        # Order must match gui.stepper.STEPS -- StepBar.index_of maps between them, and _render_active_step branches on the page index.
         for page in (self.data_viz_step, self.validation_step, self.drt_step, self.ecm_step):
             self.step_stack.addWidget(page)
         self.step_stack.currentChanged.connect(self._on_step_changed)
@@ -348,9 +310,7 @@ class MainWindow(QMainWindow):
 
     def _wire_steps(self) -> None:
         """Connect every step's controls to the handlers here."""
-        # Both run the full bookkeeping pass: the per-sweep lists _refresh()
-        # derives are keyed off the displayed subset, so a cursor move has to
-        # recompute them or the plots go stale.
+        # Both run the full bookkeeping pass: the per-sweep lists _refresh() derives are keyed off the displayed subset.
         self._selection.selection_changed.connect(self._refresh)
         self._selection.cursor_moved.connect(self._refresh)
 
@@ -371,28 +331,20 @@ class MainWindow(QMainWindow):
         val.inductive_check.toggled.connect(self._refresh)
         val.kk_radio.toggled.connect(self._on_method_changed)
         val.threshold_spin.valueChanged.connect(self._refresh)
-        # The mode decides which limit the stored results are rejected against,
-        # so switching it re-masks without re-running. max_removed is read at
-        # run time only, so it needs no wiring.
+        # The mode decides which limit the stored results are rejected against, so switching it re-masks without re-running.
         val.basic_radio.toggled.connect(self._refresh)
         val.hard_limit_spin.valueChanged.connect(self._refresh)
-        # Not applied on redraw -- it is spent during a run -- but it moves the
-        # second line on the residual plot.
+        # Not applied on redraw -- it is spent during a run -- but it moves the second line on the residual plot.
         val.soft_limit_spin.valueChanged.connect(self._refresh)
         val.run_validation_button.clicked.connect(self._run_validation)
-        # Rejection reads the residual definition, so switching it re-masks the
-        # stored results and redraws the plot in the new convention. Only a
-        # re-run can change what an *advanced* prune already removed, which
-        # _update_residuals_header says out loud.
+        # Rejection reads the residual definition, so switching it re-masks the stored results; only a re-run can change what an *advanced* prune already removed.
         val.residual_modulus_radio.toggled.connect(self._refresh)
         val.export_results_button.clicked.connect(self._export_validation_results)
 
         drt = self.drt_step
-        # Redraws the measured plot with the dropped points greyed out; the
-        # masks themselves, and so every other step, are untouched.
+        # Redraws the measured plot with the dropped points greyed out; the masks, and so every other step, are untouched.
         drt.remove_inductive_check.toggled.connect(self._refresh)
-        # Both redraw the measured plot with the tail flattened; like the
-        # filter above, neither touches the masks or any other step.
+        # Both redraw the measured plot with the tail flattened, touching neither the masks nor any other step.
         drt.subtract_diffusion_check.toggled.connect(self._refresh)
         drt.diffusion_cdc_combo.currentIndexChanged.connect(self._on_diffusion_model_changed)
         drt.run_drt_button.clicked.connect(self._run_drt)
@@ -435,8 +387,7 @@ class MainWindow(QMainWindow):
         canvas.undo_requested.connect(self._undo_ecm_edit)
         canvas.redo_requested.connect(self._redo_ecm_edit)
 
-        # Filled on first open, not now: listing the elements imports pyimpspec,
-        # which would cost ~4 s while the window is still being built.
+        # Filled on first open, not now: listing the elements imports pyimpspec, ~4 s while the window is still being built.
         ecm.add_element_menu.aboutToShow.connect(
             lambda: fill_element_menu(ecm.add_element_menu, self._append_ecm_element)
             if ecm.add_element_menu.isEmpty()
@@ -448,8 +399,7 @@ class MainWindow(QMainWindow):
         ecm.fitted_values_radio.toggled.connect(self._on_ecm_values_mode_changed)
         self._update_ecm_undo_buttons()
 
-        # The eraser works on both the Data Visualisation and Validation
-        # spectra; either pane's Eraser button arms them together.
+        # The eraser works on both the Data Visualisation and Validation spectra; either pane's button arms them together.
         for pane in (viz.spectrum_pane, val.spectrum_pane):
             pane.point_mask_toggled.connect(self._on_point_mask_toggled)
             pane.eraser_toggled.connect(self._on_eraser_toggled)
@@ -492,14 +442,19 @@ class MainWindow(QMainWindow):
         """Carry the spectrum framing onto the step being opened, then draw it
         if stale, so panning survives stepping across."""
         self.step_bar.set_current(STEPS[index][0])
-        # Hidden QStackedWidget pages are not laid out, so re-assert the width
-        # here -- the visible step is then always correct.
+        # Read off the step being left, here rather than when it was last drawn: an Auto-Scale or a pan comes long after that render.
+        outgoing = self._spectrum_pane_for(self._step_index)
+        if outgoing is not None:
+            state = outgoing.view_state()
+            if state is not None:
+                self._spectrum_view_state = state
+        self._step_index = index
+        # Hidden QStackedWidget pages are not laid out, so re-assert the width here.
         self._steps()[index].set_settings_width(self._panel_width)
         incoming = self._spectrum_pane_for(index)
         if incoming is not None and self._spectrum_view_state is not None:
             incoming.set_view_state(self._spectrum_view_state)
-        # The circuit is not tied to any sweep, so it draws even with no data
-        # -- _render_active_step returns early before a file is opened.
+        # The circuit is not tied to any sweep, so it draws even with no data loaded.
         if index == 3:
             self._render_ecm_circuits()
         self._render_active_step()
@@ -553,12 +508,8 @@ class MainWindow(QMainWindow):
 
     def _build_style_map(self) -> Dict[str, Tuple[str, str]]:
         """ds.key -> (color, pg symbol) for every loaded sweep: color by sweep
-        index, shape by its file.
-
-        Two sweeps sharing an index within their own files share a color, so
-        the shape is what tells them apart -- it comes from the Marker & line
-        style dialog, falling back to the file's position in the default
-        cycle."""
+        index, shape by its file -- from the Marker & line style dialog, falling
+        back to the file's position in the default cycle."""
         from core.plotting import SERIES_COLORS, default_marker_for
 
         file_position = {lf.file_id: i for i, lf in enumerate(self._files)}
@@ -596,8 +547,7 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
 
-        # Choices for files that have since been closed are kept: reopening one
-        # in the same session should come back with the shape it was given.
+        # Choices for files that have since been closed are kept, so reopening one in the same session brings its shape back.
         self._file_markers.update(dialog.markers)
         self._marker_size = dialog.marker_size
         self._line_width = dialog.line_width
@@ -618,14 +568,8 @@ class MainWindow(QMainWindow):
 
     def _apply_base_mask(self, ds) -> None:
         """Reset ds to the mask a validation run is meant to see: the inductive
-        filter (or none at all) plus the user's own eraser edits.
-
-        Pointedly *not* the threshold pass. Those rejections are derived from a
-        result, so letting them stand as the next run's input would make a fit
-        depend on how many times Run had been clicked -- and would break the
-        replay in _refresh, which reconstructs a result's point set as this
-        base plus the run's own `pruned_points`, and reports a mismatch as a
-        stale result.
+        filter (or none at all) plus the user's own eraser edits, pointedly
+        *not* the threshold pass, whose rejections are derived from a result.
         """
         from core.filtering import clear_mask, mask_inductive_points
 
@@ -702,8 +646,7 @@ class MainWindow(QMainWindow):
         if self._syncing_panel_width:
             return
         self._apply_settings_width(width)
-        # Debounced: splitterMoved fires continuously through a drag and each
-        # write is a registry hit.
+        # Debounced: splitterMoved fires continuously through a drag and each write is a registry hit.
         self._panel_width_save_timer.start()
 
     def _save_settings_width(self) -> None:
@@ -731,17 +674,10 @@ class MainWindow(QMainWindow):
         return [(name, w) for name, w in candidates if w is not None and w.isRunning()]
 
     def closeEvent(self, event) -> None:
-        """Never let the window take a live worker thread down with it.
-
-        Qt aborts the process outright when a running QThread is destroyed --
-        0xC0000409, no traceback, no message -- and every worker here is
-        parented to this window. A Bayesian DRT batch runs for tens of minutes
-        with the plots deliberately left live to be watched, so closing mid-run
-        is an ordinary thing to do, not an edge case.
-
-        Cancellation lands between sweeps rather than inside one (see
-        gui.workers._BatchWorker), so the wait below is bounded by the sweep in
-        flight and not by the rest of the batch.
+        """Never let the window take a live worker thread down with it: Qt aborts
+        the process outright when a running QThread is destroyed (0xC0000409).
+        Cancellation lands between sweeps rather than inside one, so the wait
+        below is bounded by the sweep in flight and not by the rest of the batch.
         """
         running = self._running_workers()
         if not running:
@@ -770,10 +706,7 @@ class MainWindow(QMainWindow):
             for _, worker in running:
                 worker.cancel()
             for _, worker in running:
-                # Sliced rather than one open-ended wait() so the window keeps
-                # repainting and does not go grey. User input is excluded: a
-                # click landing during the wait could start another run, and
-                # the close is already settled.
+                # Sliced rather than one open-ended wait() so the window keeps repainting; user input is excluded, a click landing during the wait being able to start another run.
                 while not worker.wait(100):
                     QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
         finally:
@@ -808,9 +741,7 @@ class MainWindow(QMainWindow):
         self._drt_results = {}
         self._drt_params = {}
         self._drt_peaks = {}
-        self._diffusion_fits = {}
-        self._diffusion_shown = {}
-        self._pending_diffusion = {}
+        self._discard_diffusion_fits()
         self._ecm_results = {}
         self._ecm_params = {}
         self._ecm_shown_cdc = None
@@ -902,8 +833,7 @@ class MainWindow(QMainWindow):
                 generic_cache["headers"] = headers
                 generic_cache["roles"] = column_roles
 
-        # Broad on purpose: a bad column mapping must surface as a dialog.
-        # Escaping this slot would abort the process and lose loaded files.
+        # Broad on purpose: a bad column mapping must surface as a dialog rather than abort the process and lose loaded files.
         try:
             datasets = parse_generic_file(path, column_roles=column_roles, file_id=file_id)
         except Exception as exc:
@@ -963,9 +893,7 @@ class MainWindow(QMainWindow):
         if not self._datasets:
             self.statusBar().showMessage("Open a .mpt, .txt, or .csv file to begin.")
             self._show_empty_state()
-            # This branch returns before _refresh(), which normally
-            # refreshes the ECM coverage line; do it here so it stops counting
-            # sweeps from the removed file.
+            # This branch returns before _refresh(), which normally refreshes the ECM coverage line, so do it here.
             self._update_ecm_coverage()
             self._pending = None
             self._step_dirty.clear()
@@ -1079,9 +1007,7 @@ class MainWindow(QMainWindow):
         )
 
     # --------------------------------------------------------- step exports
-    #
-    # Scoped to the sweep on screen, unlike _export_bdf and _save_session
-    # above, which cover everything loaded.
+    # Scoped to the sweep on screen, unlike _export_bdf and _save_session above, which cover everything loaded.
 
     def _cursor_dataset(self, title: str):
         """The sweep the pagers are on, or None (with a message) when there is
@@ -1093,32 +1019,54 @@ class MainWindow(QMainWindow):
 
     def _save_pane_image(self, pane) -> None:
         title = "Save plot as image"
-        path, _ = QFileDialog.getSaveFileName(
-            self, title, "", "PNG image (*.png);;SVG image (*.svg)"
+        path, chosen_filter = QFileDialog.getSaveFileName(
+            self, title, "", f"{self._PNG_FILTER};;{self._SVG_FILTER}"
         )
         if not path:
             return
+        path = self._chosen_image_path(path, chosen_filter)
         try:
-            pane.save_image(path)
+            pane.save_image(str(path))
         except Exception as exc:
             QMessageBox.critical(self, title, f"Could not save the image:\n{exc}")
             return
-        self.statusBar().showMessage(f"Saved plot to '{Path(path).name}'.")
+        self.statusBar().showMessage(f"Saved plot to '{path.name}'.")
+
+    # The two image formats every plot pane offers.
+    _PNG_FILTER = "PNG image (*.png)"
+    _SVG_FILTER = "SVG image (*.svg)"
+    # Suffixes the two exporters between them recognise; anything else is given
+    # one, since a format neither knows writes no file at all.
+    _IMAGE_SUFFIXES = (".png", ".svg", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+
+    def _chosen_image_path(self, path: str, chosen_filter: str) -> Path:
+        """A save path that names an image format, mirroring
+        _chosen_export_path. A recognised suffix the user typed wins over the
+        filter dropdown, which they may never have touched; anything else takes
+        the dropdown's, since the exporter reads the format off the suffix and
+        silently writes nothing when there is none it knows.
+
+        Appended rather than substituted as _chosen_export_path does: that one
+        works on a stem this app suggested, while an image name is typed from
+        scratch, and with_suffix would turn "cell A v1.2" into "cell A v1.png".
+        """
+        path = Path(path)
+        if path.suffix.lower() in self._IMAGE_SUFFIXES:
+            return path
+        suffix = ".svg" if chosen_filter == self._SVG_FILTER else ".png"
+        return path.with_name(path.name + suffix)
 
     def _chosen_export_path(self, path: str, chosen_filter: str, zview_filter: str):
-        """(path, is_zview) for a save dialog offering CSV or ZView.
-
-        An explicit .z or .csv the user typed wins over the filter dropdown,
-        which they may never have touched.
-        """
+        """(path, is_zview) for a save dialog offering CSV or ZView. An explicit
+        .z or .csv the user typed wins over the filter dropdown, which they may
+        never have touched."""
         path = Path(path)
         if path.suffix.lower() in (".z", ".csv"):
             return path, path.suffix.lower() == ".z"
         zview = chosen_filter == zview_filter
         return path.with_suffix(".z" if zview else ".csv"), zview
 
-    # How the validated spectrum leaves the app. Both formats carry the kept
-    # points only -- the rejected ones are gone from the file, not flagged in it.
+    # How the validated spectrum leaves the app; both formats carry the kept points only.
     _VALIDATION_CSV_FILTER = "Spectrum table (*.csv)"
     _VALIDATION_ZVIEW_FILTER = "ZView data file (*.z)"
 
@@ -1172,9 +1120,7 @@ class MainWindow(QMainWindow):
         from core.bdf_export import write_residuals, write_spectrum
 
         written = [write_spectrum(path, ds, kept_only=True)]
-        # path.stem is "<sweep>.validated", so this lands beside the spectrum as
-        # "<sweep>.validated_residuals.csv". Always in the ΔZ/|Z| convention,
-        # whatever the Residuals setting is displaying -- see the tooltip there.
+        # path.stem is "<sweep>.validated", so this lands beside the spectrum. Always in the ΔZ/|Z| convention, whatever the Residuals setting displays.
         written.append(
             write_residuals(path.with_name(f"{path.stem}_residuals.csv"), result)
         )
@@ -1205,8 +1151,7 @@ class MainWindow(QMainWindow):
         )
         return written
 
-    # The two ways the DRT can leave the app. The peaks, when they have been
-    # fitted, always follow the curve into a companion file next to it.
+    # The two ways the DRT can leave the app; fitted peaks always follow the curve into a companion file.
     _DRT_CSV_FILTER = "DRT table (*.csv)"
     _DRT_ZVIEW_FILTER = "ZView data file (*.z)"
 
@@ -1259,8 +1204,7 @@ class MainWindow(QMainWindow):
 
         written = [write_drt(path, result)]
         if peaks is not None:
-            # path.stem is "<sweep>.drt", so this lands beside the curve as
-            # "<sweep>.drt_peaks.csv".
+            # path.stem is "<sweep>.drt", so this lands beside the curve as "<sweep>.drt_peaks.csv".
             written.append(
                 write_drt_peaks(path.with_name(f"{path.stem}_peaks.csv"), peaks)
             )
@@ -1277,8 +1221,7 @@ class MainWindow(QMainWindow):
 
         written = [write_drt_z(path, result)]
         if peaks is not None:
-            # A DRT says nothing about the ohmic resistance, so Rs is seeded
-            # from the sweep itself rather than left at zero.
+            # A DRT says nothing about the ohmic resistance, so Rs is seeded from the sweep itself.
             written.append(
                 write_drt_model(
                     path.with_suffix(".mdl"),
@@ -1361,17 +1304,22 @@ class MainWindow(QMainWindow):
         self._drt_peaks = drt_peaks
         self._ecm_results = ecm_results
         self._ecm_params = ecm_params
-        # Not saved in a session; _update_ecm_coverage re-derives it from the
-        # restored circuit code, as with the active step and Nyquist/Bode.
+        # Not saved in a session; _update_ecm_coverage re-derives it from the restored circuit code.
         self._ecm_shown_cdc = None
         self._manual_masked = ui_state["manual_masked"]
         self._manual_kept = ui_state["manual_kept"]
+        # Not restored but dropped: these are keyed by ds.key, which is a
+        # position (file_id:index) rather than an identity, so the first sweep
+        # of the restored session collides with the first sweep of whatever was
+        # loaded before it. Keeping them would subtract the previous data's
+        # fitted tail from this one, and the DRT would run on the result
+        # without a word about it.
+        self._discard_diffusion_fits()
 
         self._refresh_file_list_widget()
         self._populate_sweep_selectors()
 
-        # Restore the filter widgets with signals blocked; the single
-        # _refresh() below covers them all.
+        # Restore the filter widgets with signals blocked; the single _refresh() below covers them all.
         method = ui_state.get("validation_method")
         self.validation_step.kk_radio.blockSignals(True)
         self.validation_step.zhit_radio.blockSignals(True)
@@ -1394,16 +1342,10 @@ class MainWindow(QMainWindow):
             max_removed=ui_state.get("max_removed"),
         )
         self.validation_step.set_mode(ui_state.get("validation_mode", "Basic"))
-        # None for a session saved before the convention was a setting, which
-        # leaves the widget on its default -- the one such a session was
-        # rejected under.
+        # None for a session saved before the convention was a setting, leaving the widget on its default.
         self.validation_step.set_residual_mode(ui_state.get("residual_mode"))
 
-        # The DRT step's own filters, which rewrite what that step plots. Left
-        # off, the restored spectrum would be drawn unfiltered under a DRT
-        # curve computed from a filtered sweep, with nothing saying so -- and
-        # a subtraction cannot be spotted after the fact, the saved data no
-        # longer holding the tail it lost.
+        # The DRT step's own filters, which rewrite what that step plots. Left off, the restored spectrum would be drawn unfiltered under a curve computed from a filtered sweep.
         self.drt_step.remove_inductive_check.blockSignals(True)
         self.drt_step.remove_inductive_check.setChecked(
             bool(ui_state.get("drt_inductive_filter", False))
@@ -1423,8 +1365,7 @@ class MainWindow(QMainWindow):
                 self.drt_step.diffusion_cdc_combo.blockSignals(True)
                 self.drt_step.diffusion_cdc_combo.setCurrentIndex(index)
                 self.drt_step.diffusion_cdc_combo.blockSignals(False)
-        # The rows these two govern are enabled by the checkbox, and the
-        # signals that would have done it were blocked above.
+        # The rows these two govern are enabled by the checkbox, whose signal was blocked above.
         self.drt_step._sync_relevance()
 
         self.statusBar().showMessage(
@@ -1445,8 +1386,7 @@ class MainWindow(QMainWindow):
             pager = getattr(step, "pager", None)
             if pager is not None:
                 pager.setVisible(single)
-        # Residuals are Single-mode only: one figure per selected sweep would
-        # crowd out the combined spectra comparison.
+        # Residuals are Single-mode only: one figure per selected sweep would crowd out the combined spectra.
         self.validation_step.set_residuals_visible(
             self._display_mode_for(1) == "Single"
         )
@@ -1473,21 +1413,17 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Eraser off.")
 
     def _set_eraser_lock(self, locked: bool) -> None:
-        """Make the eraser modal: while it is on, only the spectra respond.
-        The menus, the step bar and every step's controls go dead, so an erase
-        cannot be interleaved with a step change or a re-run that would leave
-        the two disagreeing about which points are in.
-
-        The one live control is the Eraser button on the plot overlay, which is
-        why it lives there rather than in a settings column."""
+        """Make the eraser modal: while it is on, only the spectra respond, the
+        menus, step bar and every step's controls going dead. The one live
+        control is the Eraser button on the plot overlay, which is why it lives
+        there rather than in a settings column."""
         for action in (
             self.open_session_action,
             self.save_session_action,
             self.export_bdf_action,
             self.dark_action,
         ):
-            # Disabled individually as well as via the menu bar: their
-            # shortcuts are owned by this window and would still fire.
+            # Disabled individually as well as via the menu bar: their shortcuts are owned by this window and would still fire.
             action.setEnabled(not locked)
         self.menuBar().setEnabled(not locked)
         self.step_bar.setEnabled(not locked)
@@ -1524,13 +1460,7 @@ class MainWindow(QMainWindow):
         self.step_bar.set_theme_mode(self._theme_mode)
         self.data_viz_step.files_panel.set_theme_mode(self._theme_mode)
         self._settings.setValue("theme", self._theme_mode)
-        # The schematic's colors are baked into its SVG when schemdraw builds
-        # it, so no stylesheet can recolor it in place -- it has to be redrawn.
-        # Done here rather than left to _refresh() below, which returns early
-        # with no data: the circuit is tied to no sweep and stays editable
-        # before a file is ever opened. Skipped while the tree is unbuilt --
-        # the canvas is showing a message, and drawing one costs the pyimpspec
-        # import that ECMStep is careful not to pay at start-up.
+        # The schematic's colors are baked into its SVG, so a theme change has to redraw it -- here rather than in _refresh(), which returns early with no data.
         if self._ecm_tree is not None:
             self._render_ecm_circuits()
         # Regenerate existing figures so plot colors follow the new theme.
@@ -1542,27 +1472,20 @@ class MainWindow(QMainWindow):
         if not selected:
             return
 
-        # The run reads these masks, so put them back to the filtered data
-        # first: without this each run starts from whatever the last redraw's
-        # threshold pass had removed, so re-running a sweep fits it on fewer
-        # and fewer points and `pruned_points` no longer describes the whole
-        # difference from the base. See _apply_base_mask.
+        # The run reads these masks, so put them back to the filtered data first; otherwise each run starts from the last redraw's threshold pass and refits on fewer and fewer points.
         for ds in selected:
             self._apply_base_mask(ds)
 
-        # Module-level functions, so ValidationWorker can pickle the runner by
-        # reference when it spreads a batch over processes.
+        # Module-level functions, so ValidationWorker can pickle the runner by reference across processes.
         from core.validation import prune_iteratively, run_kk_test, run_zhit
 
         method = self._validation_method
         runner = run_kk_test if method == VALIDATION_METHODS[0] else run_zhit
         if self.validation_step.mode == "Advanced":
-            # partial of module-level callables, so this still pickles into the
-            # process pool -- a closure or a bound method would not.
+            # partial of module-level callables, so this still pickles into the process pool -- a closure or bound method would not.
             runner = partial(prune_iteratively, runner=runner, **self._prune_settings())
 
-        # Masks must stay stable while the worker reads them, so the settings
-        # panels are locked for the run.
+        # Masks must stay stable while the worker reads them, so the settings panels are locked for the run.
         self._worker_errors = []
         self._running_keys = [ds.key for ds in selected]
         self._worker = ValidationWorker(method, runner, selected, parent=self)
@@ -1595,16 +1518,14 @@ class MainWindow(QMainWindow):
     def _on_validation_result(self, method: str, key: str, result) -> None:
         from core.validation import PruneOutcome
 
-        # Z-HIT takes no extra kwargs; these mirror the non-default arguments
-        # in core.validation.run_kk_test's signature.
+        # Z-HIT takes no extra kwargs; these mirror the non-default arguments in core.validation.run_kk_test.
         params = (
             {"test": "complex", "admittance": False, "num_F_ext_evaluations": 10}
             if method == VALIDATION_METHODS[0]
             else {}
         )
         if isinstance(result, PruneOutcome):
-            # The removals are part of how this result was produced, not a
-            # separate cache: without them it does not describe any point set.
+            # The removals are part of how this result was produced, not a separate cache: without them it describes no point set.
             params.update(
                 self._prune_settings(),
                 pruned_points=list(result.removed),
@@ -1659,20 +1580,13 @@ class MainWindow(QMainWindow):
 
     def _drt_inputs(self, datasets: List, detached: bool = False) -> List:
         """The sweeps the DRT sees, which are not necessarily the sweeps
-        themselves: the DRT step's own two filters -- the inductive-tail mask
-        and the diffusion-tail subtraction -- are applied to copies. The shared
-        mask stays put, so a validation run done without them is not marked
-        stale by turning one on here, and the ECM step keeps reading the sweep
-        as measured.
+        themselves: the step's own inductive-tail mask and diffusion-tail
+        subtraction are applied to copies, so the shared mask stays put.
 
         `detached` guarantees copies whether or not that filter is on, for the
-        worker thread: it reads its datasets for as long as the run lasts, and
-        the eraser stays live on the plot throughout, so the originals can be
-        remasked under it. Callers that only draw pass the live sweeps.
-
-        The two filters compose in the order the spectrum is read: the
-        inductive points are dropped first, so the diffusion fit underneath is
-        not asked to explain them."""
+        worker thread. The two filters compose in the order the spectrum is
+        read, the inductive points going first.
+        """
         from core.filtering import detached_copy, inductive_tail_removed
 
         if self.drt_step.remove_inductive_check.isChecked():
@@ -1681,29 +1595,19 @@ class MainWindow(QMainWindow):
         # Always returns copies, which is why it settles `detached` too.
         if self.drt_step.subtract_diffusion_check.isChecked():
             return self._diffusion_applied(datasets)
-        # Nothing was subtracted, so nothing is on record. Cleared rather than
-        # left alone: fits from when the filter was on would otherwise still be
-        # sitting here, and _on_drt_worker_result would read them as this
-        # batch's -- putting a diffusion element into a circuit built from a
-        # sweep that still has its tail, which double-counts it.
+        # Nothing was subtracted, so nothing is on record. Cleared rather than left alone: stale fits would be read as this batch's and double-count the tail.
         self._diffusion_shown = {}
         return [detached_copy(ds) for ds in datasets] if detached else datasets
 
     def _diffusion_applied(self, datasets: List) -> List:
         """The sweeps with a fitted diffusion tail subtracted, always as copies.
-
-        Fits are cached because this runs on every redraw, not just on Run: a
-        pager step or a checkbox toggle would otherwise refit every sweep on
-        screen. A sweep whose fit fails passes through unsubtracted rather than
-        dropping out -- the readout says which, and a missing tail is easier to
-        read on the plot than a missing sweep."""
+        Fits are cached because this runs on every redraw, not just on Run. A
+        sweep whose fit fails passes through unsubtracted rather than dropping
+        out -- the readout says which."""
         from core.filtering import detached_copy, diffusion_impedance, impedance_subtracted
 
         cdc = self.drt_step.diffusion_cdc_combo.currentData()
-        # What the readout describes. Recorded here rather than looked up
-        # again later because the sweep reaching this point may already be the
-        # inductive filter's copy, whose mask -- and so whose cache key -- is
-        # not the one the caller's original sweep would rebuild.
+        # What the readout describes, recorded here rather than looked up later: the sweep reaching this point may already be the inductive filter's copy, whose cache key differs.
         self._diffusion_shown = {}
         applied = []
         for ds in datasets:
@@ -1727,15 +1631,20 @@ class MainWindow(QMainWindow):
             )
         return applied
 
-    def _evict_diffusion_fits(self) -> None:
-        """Keep the fit cache bounded, oldest first.
+    def _discard_diffusion_fits(self) -> None:
+        """Throw away every diffusion fit on record. All three go together: the
+        cache, what the readout is describing, and the snapshot a run in flight
+        is working from. Called wherever the sweeps behind those keys are
+        replaced wholesale, since ds.key names a position and not a sweep."""
+        self._diffusion_fits = {}
+        self._diffusion_shown = {}
+        self._pending_diffusion = {}
 
-        The mask is part of the key, so every eraser click on a subtracted
-        sweep mints a new entry and the old one can never be hit again -- an
-        afternoon's editing would otherwise accumulate a fit result and an
-        impedance array per click. The cap is set well above a batch so that a
-        single redraw over the whole selection still lands entirely in cache;
-        evicting into a redraw would refit every sweep on every repaint.
+    def _evict_diffusion_fits(self) -> None:
+        """Keep the fit cache bounded, oldest first. The mask is part of the key,
+        so every eraser click on a subtracted sweep mints an entry that can never
+        be hit again; the cap sits well above a batch, so one redraw over the
+        whole selection still lands entirely in cache.
         """
         while len(self._diffusion_fits) > MAX_DIFFUSION_FITS:
             self._diffusion_fits.pop(next(iter(self._diffusion_fits)))
@@ -1747,13 +1656,10 @@ class MainWindow(QMainWindow):
         from core.filtering import describe_diffusion_fit
 
         label = self.drt_step.diffusion_status_label
-        # The row holds two lines; anything longer belongs in the tooltip,
-        # which is restored on every branch so a failure's message does not
-        # outlive the failure.
+        # The row holds two lines; anything longer belongs in the tooltip, which is restored on every branch.
         label.setToolTip(self.drt_step.diffusion_status_tooltip)
 
-        # The row spans both form columns and so has no label of its own; each
-        # message names itself.
+        # The row spans both form columns and so has no label of its own; each message names itself.
         if not self.drt_step.subtract_diffusion_check.isChecked():
             label.setText("Subtracted: —")
             style.set_state(label, "muted")
@@ -1771,21 +1677,14 @@ class MainWindow(QMainWindow):
             label.setText("Subtracted: —")
             style.set_state(label, "muted")
         elif isinstance(fit, str):
-            # The cache stores a failed fit's message in the result's place. A
-            # fitter's message can run to a paragraph, so the label gets a
-            # single line's worth and the tooltip gets all of it.
-            # The label elides what will not fit; the tooltip keeps all of it,
-            # because a fitter's message can run to a paragraph.
+            # The cache stores a failed fit's message in the result's place; the label elides what will not fit, and the tooltip keeps all of it, because a fitter's message can run to a paragraph.
             label.setText(f"Not subtracted\n{fit}")
             label.setToolTip(
                 f"{self.drt_step.diffusion_status_tooltip}\n\nThis sweep: {fit}"
             )
             style.set_state(label, "error")
         else:
-            # No "Subtracted:" prefix on this one: the element's own name opens
-            # the line, and the width it would cost is the width the fitted
-            # values need. The row sits directly under the checkbox that names
-            # the operation, and the tooltip says the rest.
+            # No "Subtracted:" prefix here: the element's own name opens the line, and that width is what the fitted values need.
             label.setText(describe_diffusion_fit(fit))
             style.set_state(label, "ok")
 
@@ -1797,9 +1696,7 @@ class MainWindow(QMainWindow):
         return dict(
             params,
             remove_inductive_tail=self.drt_step.remove_inductive_check.isChecked(),
-            # The circuit as well as the flag: a subtraction cannot be
-            # reconstructed from the saved data, which no longer holds the tail
-            # it removed, so a reader who only knows it happened knows nothing.
+            # The circuit as well as the flag: a subtraction cannot be reconstructed from saved data that no longer holds the tail it removed.
             subtract_diffusion=subtracting,
             diffusion_cdc=(
                 self.drt_step.diffusion_cdc_combo.currentData() if subtracting else None
@@ -1884,16 +1781,10 @@ class MainWindow(QMainWindow):
         )
 
     def _start_drt_run(self, selected: List, params: dict, name: str) -> None:
-        """Hand a batch of sweeps to the DRT worker thread.
-
-        Plain TR-RBF runs here too, not just the Bayesian method, because it is
-        only fast on a sweep pyimpspec can take its shortcut on: assembling the
-        A matrix by the Toeplitz trick needs the frequencies log-spaced to
-        within 1%, which costs 2N quadratures instead of 2N². Points dropped by
-        the eraser, an iterative prune or the inductive-tail filter break that
-        spacing, and so do the rounded frequencies most instruments write (a
-        three-significant-figure decade ladder lands at ~1.4%). The fallback
-        takes tens of seconds a sweep -- far too long to hold the UI thread.
+        """Hand a batch of sweeps to the DRT worker thread -- plain TR-RBF too,
+        not just the Bayesian method. TR-RBF is fast only on a sweep pyimpspec
+        can take its Toeplitz shortcut on, which needs the frequencies log-spaced
+        to within 1%; the fallback takes tens of seconds a sweep.
         """
         from core.drt import run_drt
 
@@ -1905,12 +1796,7 @@ class MainWindow(QMainWindow):
         self._pending_drt_params = self._drt_record(params)
         self._drt_worker_errors = []
         inputs = self._drt_inputs(selected, detached=True)
-        # A copy, not a reference. _diffusion_shown is rebuilt by every redraw
-        # and covers only the sweeps then on screen, while the pager stays live
-        # through a run -- _set_controls_enabled locks the settings column and
-        # nothing else, so a batch can be watched. One click on › would
-        # otherwise shrink it to that one sweep, and every result still to come
-        # would record no diffusion element at all.
+        # A copy, not a reference: _diffusion_shown is rebuilt by every redraw while the pager stays live through a run, so one click on › would otherwise shrink it to that one sweep.
         self._pending_diffusion = dict(self._diffusion_shown)
         self._drt_worker = DRTWorker(runner, inputs, parent=self)
         self._drt_worker.result_ready.connect(self._on_drt_worker_result)
@@ -1926,12 +1812,7 @@ class MainWindow(QMainWindow):
         from core.filtering import diffusion_element_cdc
 
         self._drt_results[key] = result
-        # The diffusion fit is recorded per sweep, unlike the rest of the
-        # record, because each sweep has its own -- and it is what "Build
-        # circuit from DRT" has to put back into the model. Read from the
-        # snapshot _start_drt_run took, not from _diffusion_shown: that one
-        # tracks the screen and will have moved on by the time a long batch
-        # reports back.
+        # The diffusion fit is recorded per sweep, being what "Build circuit from DRT" puts back into the model. Read from _start_drt_run's snapshot, not the screen's.
         fit = self._pending_diffusion.get(key)
         self._drt_params[key] = dict(
             self._pending_drt_params,
@@ -2021,13 +1902,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Build circuit from DRT", str(exc))
             return
 
-        # A DRT computed on a subtracted sweep describes a cell without its
-        # tail, so its peaks give a circuit without one -- and ECM fits the
-        # sweep as measured, tail included. Fitting that mismatch does not
-        # merely fit poorly: the R-CPE pairs absorb the tail and their
-        # resistances come out by tens of percent, with a pseudo chi-squared
-        # that looks perfectly acceptable. Putting the fitted element back is
-        # what closes the gap; see core.filtering.diffusion_element_cdc.
+        # A DRT of a subtracted sweep gives a circuit with no tail, while ECM fits the sweep as measured -- so the R-CPE pairs absorb the tail and the resistances come out badly.
         subtracted = (self._drt_params.get(source.key) or {}).get("diffusion_element")
         if subtracted:
             cdc += subtracted
@@ -2051,23 +1926,16 @@ class MainWindow(QMainWindow):
         style.set_state(self.ecm_step.cdc_status_label, "ok" if ok else "error")
         self.ecm_step.run_button.setEnabled(ok)
 
-        # Typed edits rebuild the canvas's tree; canvas edits wrote this text in
-        # the first place and must not have it parsed back over them.
+        # Typed edits rebuild the canvas's tree; canvas edits wrote this text and must not have it parsed back over them.
         if not self._ecm_syncing:
             self._rebuild_ecm_tree(text, ok)
 
-        # The ECM step previews this code as a schematic while nothing is
-        # fitted, so redraw immediately for the preview. Once there are fits,
-        # only mark dirty: rendering also rebuilds the text report, which would
-        # make typing lag.
+        # The ECM step previews this code as a schematic while nothing is fitted, so redraw immediately; once there are fits, only mark dirty, since rendering also rebuilds the text report.
         self._step_dirty.add(3)
-        # The canvas is the editing surface, so it always follows the code --
-        # _render_ecm_circuits skips the redraw when nothing it draws changed.
+        # The canvas is the editing surface, so it always follows the code; _render_ecm_circuits skips the redraw when nothing changed.
         self._render_ecm_circuits()
 
-        # The plots and the text report follow this code box now, so they have
-        # to keep up with it -- but rebuilding them per keystroke would make
-        # typing lag, so they wait for the typing to settle.
+        # The plots and text report follow this code box, but rebuilding them per keystroke would lag, so they wait for the typing to settle.
         self._ecm_display_timer.start()
 
     def _refresh_ecm_display(self) -> None:
@@ -2247,8 +2115,7 @@ class MainWindow(QMainWindow):
         text = self.ecm_step.cdc_edit.text().strip()
         if self._ecm_tree is None:
             self._ecm_drawn = None
-            # First draw: ECMStep seeds the code with signals blocked, so the
-            # tree has not been built from it yet.
+            # First draw: ECMStep seeds the code with signals blocked, so the tree has not been built from it yet.
             from core.ecm import validate_cdc
 
             self._rebuild_ecm_tree(text, validate_cdc(text)[0])
@@ -2265,8 +2132,7 @@ class MainWindow(QMainWindow):
 
         colors = diagram_colors(self._theme_mode)
         result, ds = self._ecm_annotation()
-        # Every caller redraws unconditionally, and a keystroke can reach here
-        # twice; skip the schemdraw pass when nothing it draws has changed.
+        # Every caller redraws unconditionally and a keystroke can reach here twice, so skip the schemdraw pass when nothing changed.
         signature = (text, id(result), self._theme_mode)
         if signature == self._ecm_drawn:
             return
@@ -2349,8 +2215,7 @@ class MainWindow(QMainWindow):
                 f"this circuit."
             )
         else:
-            # Says so explicitly, because the fits for other circuits are still
-            # cached and it should not look like they were thrown away.
+            # Says so explicitly, because the fits for other circuits are still cached and should not look thrown away.
             label.setText(
                 "Not fitted with this circuit yet. Earlier circuits' fits are "
                 "kept — put one back in the code box to see it again."
@@ -2382,8 +2247,7 @@ class MainWindow(QMainWindow):
         seed = self.ecm_step.seed_check.isChecked()
 
         if seed:
-            # A one-element list so the closure can rebind it: each fit seeds
-            # the next, which is why ECMWorker runs the batch serially.
+            # A one-element list so the closure can rebind it: each fit seeds the next, which is why ECMWorker runs the batch serially.
             previous = [None]
 
             def runner(ds):
@@ -2424,8 +2288,7 @@ class MainWindow(QMainWindow):
     def _on_ecm_finished(self) -> None:
         self._ecm_worker = None
         self._set_controls_enabled(True)
-        # No need to point the step at what was just fitted: _refresh() below
-        # re-derives that from the code box, which still holds it.
+        # No need to point the step at what was just fitted: _refresh() below re-derives that from the code box.
         failed = len(self._ecm_worker_errors)
         self.statusBar().showMessage(
             f"Circuit fitting finished ({failed} failed)." if failed
@@ -2468,8 +2331,7 @@ class MainWindow(QMainWindow):
             self.data_viz_step.spectrum_pane.set_message(
                 "No sweep selected — tick one in Files and sets below."
             )
-            # This branch returns before the recompute below, so refresh the
-            # "N of M fitted" count here.
+            # This branch returns before the recompute below, so refresh the "N of M fitted" count here.
             self._update_ecm_coverage()
             self._pending = None
             self._step_dirty.clear()
@@ -2480,8 +2342,7 @@ class MainWindow(QMainWindow):
         threshold = self.validation_step.reject_threshold
         residual_mode = self.validation_step.residual_mode
 
-        # Exactly what a run starts from, so the replay below lands on the same
-        # point set the stored result was fitted on.
+        # Exactly what a run starts from, so the replay below lands on the same point set the stored result was fitted on.
         for ds in selected:
             self._apply_base_mask(ds)
 
@@ -2489,16 +2350,13 @@ class MainWindow(QMainWindow):
         for ds in selected:
             result = self._validation_results.get((method, ds.key))
             if result is not None:
-                # Replayed before the threshold pass, not derived by it: an
-                # iterative prune's removals are the point set the result was
-                # fitted on, and re-deriving them would mean re-running it.
+                # Replayed before the threshold pass, not derived by it: an iterative prune's removals cannot be re-derived without re-running it.
                 mask_points(ds, self._pruned_points(method, ds.key))
                 try:
                     mask_residual_outliers(ds, result, threshold, residual_mode)
                 except ValueError:
                     stale_keys.append(ds.key)
-            # Re-applied on top of the outlier pass, which only adds masks, so
-            # a manually restored point survives a threshold that would drop it.
+            # Re-applied on top of the outlier pass, which only adds masks, so a manually restored point survives a threshold that would drop it.
             self._apply_manual_overrides(ds)
 
         if stale_keys:
@@ -2513,12 +2371,10 @@ class MainWindow(QMainWindow):
         else:
             self.warning_label.hide()
 
-        # Masking above covers the whole working set. From here on, figures
-        # concern only the on-screen subset, which differs per step.
+        # Masking above covers the whole working set; from here on, figures concern only the on-screen subset, which differs per step.
         displayed_for = {i: self._displayed_datasets(i) for i in range(len(STEPS))}
 
-        # Each list below is read by exactly one step, built from that step's
-        # own displayed subset.
+        # Each list below is read by exactly one step, built from that step's own displayed subset.
         validated_selected = [
             ds
             for ds in displayed_for[1]
@@ -2529,8 +2385,7 @@ class MainWindow(QMainWindow):
             for ds in displayed_for[2]
             if ds.key in self._drt_results
         ]
-        # Must run before _ecm_shown_cdc is read below: it settles which
-        # circuit is displayed, from the code box.
+        # Must run before _ecm_shown_cdc is read below: it settles which circuit is displayed, from the code box.
         self._update_ecm_coverage()
         shown_cdc = self._ecm_shown_cdc
         ecm_curves = self._ecm_fit_curves(displayed_for[3], shown_cdc)
@@ -2540,8 +2395,7 @@ class MainWindow(QMainWindow):
             method=method,
             threshold=threshold,
             residual_mode=residual_mode,
-            # Second residual line, drawn only where it means something: in
-            # basic mode there is one limit, and it is `threshold`.
+            # Second residual line, drawn only where it means something: in basic mode there is one limit, `threshold`.
             soft_threshold=(
                 self.validation_step.soft_limit_spin.value()
                 if self.validation_step.mode == "Advanced"
@@ -2557,18 +2411,15 @@ class MainWindow(QMainWindow):
 
     def _update_residuals_header(self, shown: int, total: int) -> None:
         """Say what the residual plot is showing, or why it is showing nothing.
-
-        The plot is Singular-only (see _sync_display_mode_widgets), so in
-        Multiple view there is no figure to describe and only the convention
-        still applies."""
+        The plot is Singular-only (see _sync_display_mode_widgets), so in Multiple
+        view there is no figure to describe and only the convention applies."""
         val = self.validation_step
         single = self._display_mode_for(1) == "Single"
 
         if total == 0:
             text = "No validated sweeps — run a validation first."
         elif not single:
-            # The convention still governs rejection here, so it is worth
-            # saying that the setting has not gone dead along with the plot.
+            # The convention still governs rejection here, so it is worth saying the setting has not gone dead with the plot.
             text = (
                 f"{total} validated sweep(s). Switch to Singular for the "
                 "residual plot; the Residuals setting above still sets what "
@@ -2580,8 +2431,7 @@ class MainWindow(QMainWindow):
             text = "Showing the sweep on screen; page with ‹ › above."
 
         if self.validation_step.mode == "Advanced":
-            # An advanced prune's removals are baked into the stored result, so
-            # re-reading them under a new convention is not possible.
+            # An advanced prune's removals are baked into the stored result, so re-reading them under a new convention is not possible.
             text += (
                 "\n\nChanging the residual definition re-rejects against the "
                 "hard limit, but what the iterative prune already removed "
@@ -2640,9 +2490,7 @@ class MainWindow(QMainWindow):
         """The per-peak table for whatever is on screen, shown beside the DRT
         controls rather than in a pane of its own."""
         table = self.drt_step.peaks_table
-        # Columns come from the upstream dataframe, so they follow whatever the
-        # peak fitter reports. A "Set" column is prepended only when it earns
-        # its width -- with one sweep on screen every row would repeat it.
+        # Columns come from the upstream dataframe, so they follow the peak fitter; a "Set" column is prepended only when it earns its width.
         rows: List[Tuple[str, List[str]]] = []
         columns: List[str] = []
         for ds in drawn:
@@ -2720,10 +2568,7 @@ class MainWindow(QMainWindow):
 
         elif index == 1:
             self._draw_spectrum(self.validation_step.spectrum_pane, drawn, show_removed=True)
-            # Singular draws its one residual figure straight away; Multiple
-            # collapses the pane outright (_sync_display_mode_widgets), so
-            # there is nothing to draw and one figure per selected sweep would
-            # be wasted work.
+            # Singular draws its one residual figure straight away; Multiple collapses the pane outright, so there is nothing to draw.
             validated = p["validated_selected"]
             shown = validated[:1] if self._display_mode_for(1) == "Single" else []
             figure = None
@@ -2735,22 +2580,18 @@ class MainWindow(QMainWindow):
                     threshold=p["threshold"],
                     soft_threshold=p["soft_threshold"],
                     residual_mode=p["residual_mode"],
-                    # Bare, without the method the title carries: a point's
-                    # metadata box names the sweep, as on every other plot.
+                    # Bare, without the method the title carries: a point's metadata box names the sweep, as on every other plot.
                     label=self._display_label(ds),
                 )
             self.validation_step.residuals_pane.set_widget(figure)
             self._update_residuals_header(len(shown), len(validated))
 
         elif index == 2:
-            # Through _drt_inputs, so this step's own inductive-tail filter
-            # shows here as removed points without the other steps' plots (or
-            # their masks) moving.
+            # Through _drt_inputs, so this step's own inductive-tail filter shows here as removed points without moving the other steps' plots or masks.
             self._draw_spectrum(
                 self.drt_step.top_pane, self._drt_inputs(drawn), show_removed=True
             )
-            # After the draw, not before: _drt_inputs is what fills in the fits
-            # the readout describes.
+            # After the draw, not before: _drt_inputs is what fills in the fits the readout describes.
             self._update_diffusion_label(drawn)
 
             if p["drt_selected"]:
@@ -2778,13 +2619,10 @@ class MainWindow(QMainWindow):
                     )
                 )
             else:
-                # No fit for what is on screen: show the measured spectrum, so
-                # the step still says which sweep "Fit circuit" would act on.
+                # No fit for what is on screen: show the measured spectrum, so the step still says which sweep "Fit circuit" would act on.
                 self._draw_spectrum(self.ecm_step.spectrum_pane, drawn, show_removed=False)
 
-            # The circuit in the code box only, one entry per drawn sweep. The
-            # other circuits' fits stay cached; listing them all here is what
-            # made this unreadable after a dozen guesses.
+            # The circuit in the code box only, one entry per drawn sweep; the other circuits' fits stay cached but listing them all made this unreadable.
             from core.ecm import format_fit_report
 
             report_lines = []
@@ -2795,12 +2633,7 @@ class MainWindow(QMainWindow):
             self.ecm_step.params_text.setPlainText("\n".join(report_lines))
             self._render_ecm_circuits()
 
-        # Remember the framing so the next step opens on the same view.
-        pane = self._spectrum_pane_for(index)
-        if pane is not None:
-            state = pane.view_state()
-            if state is not None:
-                self._spectrum_view_state = state
-
+        # The framing is not read off here: _on_step_changed takes it from the
+        # step being left, which is the only moment it is final.
         self._step_dirty.discard(index)
 

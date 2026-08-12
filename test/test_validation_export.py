@@ -1,9 +1,8 @@
 """Exporting a sweep once it has been validated.
 
 Drives MainWindow._export_validation_results rather than the writers directly
-(test_zview_export covers those), because the thing worth pinning here is that
-the file gets the *validated* point set -- the export runs off the dataset's
-live mask, which only a redraw puts in its final state.
+(test_zview_export covers those), because what is worth pinning here is that
+the file gets the *validated* point set.
 """
 import os
 
@@ -172,8 +171,7 @@ def test_csv_export_writes_spectrum_and_residuals(win, monkeypatch, tmp_path):
     spectrum = (tmp_path / "s.csv").read_text().strip().splitlines()
     residuals = (tmp_path / "s_residuals.csv").read_text().strip().splitlines()
 
-    # One header row each. The spectrum is the kept points; the residuals, like
-    # the ZView fit above, cover everything the validation was fitted on.
+    # One header row each: the spectrum is the kept points, the residuals cover everything the validation was fitted on.
     assert len(spectrum) == len(unmasked_indices(win._datasets[0])) + 1
     assert len(residuals) == len(f) + 1
 

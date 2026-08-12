@@ -5,12 +5,9 @@ import sys
 from pathlib import Path
 
 def _assets_dir() -> Path:
-    """gui/assets, in a checkout and inside a PyInstaller bundle alike.
-
-    This file is the frozen app's entry script, so it runs as __main__ with
-    __file__ at the bundle root rather than under gui/ -- the plain
-    __file__-relative path resolves one directory too high and every asset
-    below silently goes missing.
+    """gui/assets, in a checkout and inside a PyInstaller bundle alike. This
+    file is the frozen app's entry script, so the plain __file__-relative path
+    resolves one directory too high and every asset below goes missing.
     """
     if getattr(sys, "frozen", False):
         return Path(sys._MEIPASS) / "gui" / "assets"
@@ -19,34 +16,25 @@ def _assets_dir() -> Path:
 
 ASSETS_DIR = _assets_dir()
 ICON_PATH = ASSETS_DIR / "icon.ico"
-# The splash uses the full logo rather than the icon: the icon is the wordmark
-# alone, padded square for the taskbar, so it reads small on a 420x260 card.
+# The splash uses the full logo rather than the icon, which is the wordmark alone, padded square for the taskbar.
 SPLASH_LOGO_PATH = ASSETS_DIR / "splash.png"
 
-# gui.style is Qt-light (no pyqtgraph, no qdarktheme), so the splash can share
-# the real accent color without duplicating the literal.
+# gui.style is Qt-light (no pyqtgraph, no qdarktheme), so the splash can share the real accent color.
 from gui.style import ACCENT  # noqa: E402
 
-# Splash card geometry. _splash_pixmap centres the logo against the progress
-# bar, and main() positions the bar, so both read the same numbers -- otherwise
-# a change to one silently knocks the logo off centre.
+# Splash card geometry, read by both _splash_pixmap and main() so the logo stays centred on the progress bar.
 SPLASH_SIZE = (420, 260)
-# installer/make_wizard_images.py mirrors this so the setup wizard and the app
-# it launches share a background. Change both together.
+# installer/make_wizard_images.py mirrors this so the wizard and the app share a background; change both together.
 SPLASH_BG = "#15181d"
 _SPLASH_MARGIN = 24
-# Caps the logo's width well inside the card, so a wide asset stays a mark on
-# a card rather than filling it edge to edge.
+# Caps the logo's width well inside the card, so a wide asset stays a mark rather than filling it.
 SPLASH_LOGO_WIDTH = 260
 _PROGRESS_MARGIN = 20  # left/right inset, and the gap below the bar
 _PROGRESS_HEIGHT = 16
 # Top edge of the progress bar, measured up from the bottom of the card.
 _PROGRESS_TOP = _PROGRESS_MARGIN + _PROGRESS_HEIGHT
 
-# Shown one at a time on the splash screen while each module loads. Together
-# they cost several seconds, more on a cold boot. Blocking on them here, with
-# visible progress, puts the wait up front instead of on the first click of
-# Plot/Validate.
+# Shown one at a time on the splash while each module loads; blocking here, with visible progress, puts the several-second wait up front.
 _SPLASH_STEPS = (
     ("Loading numerical libraries...", "numpy"),
     ("Loading plotting libraries (PyQtGraph)...", "pyqtgraph"),
@@ -55,8 +43,7 @@ _SPLASH_STEPS = (
     ("Loading validation tools (pyimpspec)...", "core.validation"),
     ("Loading DRT tools...", "core.drt"),
     ("Loading circuit fitting tools...", "core.ecm"),
-    # ~0.5 s, deferred by core.circuit_diagram, so without this the first
-    # visit to the ECM Parameters tab pays it mid-click.
+    # ~0.5 s, deferred by core.circuit_diagram, so without this the first visit to ECM Parameters pays it mid-click.
     ("Loading circuit diagrams...", "schemdraw.elements"),
     ("Loading filters...", "core.filtering"),
     ("Loading generic parser...", "core.generic_parser"),
@@ -82,9 +69,7 @@ def _install_crash_reporter():
     from datetime import datetime
 
     log_path = _crash_log_path()
-    # Held open for the process lifetime: faulthandler writes to this
-    # descriptor from inside a fault handler, where opening a file is unsafe.
-    # Line-buffered so a hard crash cannot lose what preceded it.
+    # Held open for the process lifetime: faulthandler writes to this descriptor from inside a fault handler, and line buffering means a hard crash loses nothing.
     log_file = open(log_path, "a", buffering=1, encoding="utf-8")
     faulthandler.enable(file=log_file)
 
@@ -97,9 +82,7 @@ def _install_crash_reporter():
         log_file.write(f"\n=== {datetime.now():%Y-%m-%d %H:%M:%S} ===\n{text}")
         sys.stderr.write(text)
 
-        # One dialog per distinct traceback, and never a second while the first
-        # is open: an exception from a paint or timer handler repeats on every
-        # event and would bury the app in unclosable windows.
+        # One dialog per distinct traceback, and never a second while the first is open: an exception from a paint or timer handler repeats on every event.
         if reporting or text in seen:
             return
         seen.add(text)
@@ -165,12 +148,9 @@ def _splash_pixmap():
     if logo.isNull():  # missing asset should not cost us the splash
         logo = QPixmap(str(ICON_PATH))
     if not logo.isNull():
-        # Centred in the whole band above the progress bar. The wordmark is
-        # part of the logo asset and showMessage writes the per-step status
-        # below the bar, so this band holds nothing else.
+        # Centred in the whole band above the progress bar, which holds nothing else.
         band = height - _PROGRESS_TOP
-        # Bounded on both axes so a logo of any aspect ratio stays inside the
-        # band rather than overrunning it.
+        # Bounded on both axes so a logo of any aspect ratio stays inside the band.
         logo = logo.scaled(
             SPLASH_LOGO_WIDTH,
             band - 2 * _SPLASH_MARGIN,
@@ -189,15 +169,10 @@ def _splash_pixmap():
 
 
 def main() -> None:
-    # Must run before anything else: in a bundled executable this stops a
-    # spawned worker from re-running the whole GUI.
+    # Must run before anything else: in a bundled executable this stops a spawned worker re-running the whole GUI.
     multiprocessing.freeze_support()
 
-    # Keep these imports inside main() -- do NOT hoist them to module scope.
-    # ValidationWorker spreads batches across processes, and Windows spawns
-    # each by re-importing this file as __mp_main__. At module scope, PySide6 +
-    # pyqtgraph + pyimpspec cost every worker ~8 s and enough memory that a
-    # pool of 8 exhausted the paging file ("DLL load failed ... _core").
+    # Keep these imports inside main(): Windows spawns each worker by re-importing this file, and at module scope they cost every worker ~8 s and exhausted the paging file.
     from importlib import import_module
 
     from PySide6.QtCore import Qt
@@ -241,8 +216,7 @@ def main() -> None:
         try:
             import_module(module_name)
         except Exception:
-            # Let a broken import surface at its real use site, with a real
-            # traceback, rather than swallowing it here.
+            # Let a broken import surface at its real use site, with a real traceback.
             pass
         progress.setValue(step)
         app.processEvents()

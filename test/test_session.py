@@ -122,13 +122,9 @@ assert loaded_ui_state["manual_kept"][dataset.key] == manual_kept[dataset.key]
 assert loaded_ui_state["validation_method"] == "kk"
 assert loaded_ui_state["inductive_filter"] is True
 assert loaded_ui_state["residual_threshold"] == 2.5
-# The convention decides which points a stored result rejects, so a reloaded
-# session has to come back on the one it was saved under.
+# The convention decides which points a stored result rejects, so a reloaded session must come back on the one it was saved under.
 assert loaded_ui_state["residual_mode"] == "component"
-# The DRT step's own filters, which are not the validation step's. Without
-# these a reloaded session redraws the spectrum unfiltered beneath a DRT curve
-# computed from a filtered one, and a subtraction cannot be spotted after the
-# fact -- the saved points no longer hold the tail that was taken off them.
+# The DRT step's own filters, which are not the validation step's; without them a reloaded session redraws the spectrum unfiltered beneath a DRT curve computed from a filtered one.
 assert loaded_ui_state["drt_inductive_filter"] is True
 assert loaded_ui_state["drt_subtract_diffusion"] is True
 assert loaded_ui_state["drt_diffusion_cdc"] == "R(RQ)Ws"
@@ -185,24 +181,20 @@ Path(v1_path).write_text(json.dumps(v1_session))
 assert v1_ecm == {} and v1_ecm_params == {}
 assert v1_datasets[0].source_file == "synthetic"
 assert v1_datasets[0].file_id == 0  # absent in v1 -> defaults to the single-file assumption
-# v1 sessions stored "dataset_label" ("Set 01") rather than a key. On load it
-# resolves to ds.key (see load_session._resolve_key), which for this
-# single-dataset session is "0:0" -- not dataset.label.
+# v1 sessions stored "dataset_label" ("Set 01") rather than a key; on load it resolves to ds.key, here "0:0".
 v1_key = v1_datasets[0].key
 assert v1_validation_params == {("kk", v1_key): {}}
 assert v1_drt_params == {v1_key: {}}
 assert v1_ui_state["manual_masked"] == {}
 assert v1_ui_state["inductive_filter"] is False
-# The DRT filters arrived in schema v5. A session predating them was reloaded
-# with both off, so that is what they fall back to rather than a guess.
+# The DRT filters arrived in schema v5, and a session predating them was reloaded with both off.
 assert v1_ui_state["drt_inductive_filter"] is False
 assert v1_ui_state["drt_subtract_diffusion"] is False
 assert v1_ui_state["drt_diffusion_cdc"] is None
 print("v1 backward-compatibility OK, resolved label -> key:", dataset.label, "->", v1_key)
 
 # --- multi-file: two files whose sweeps share a label ("Set 01") ---
-# Must not collide, which is why results are keyed by ds.key (file_id:index)
-# rather than ds.label. See core.io_utils.EISDataset.
+# Must not collide, which is why results are keyed by ds.key (file_id:index) rather than ds.label.
 dataset_b = EISDataset(DataSet(frequencies=f, impedances=Z * 1.1), index=0, source_file="synthetic_b", file_id=1)
 assert dataset_b.label == dataset.label == "Set 01"
 assert dataset_b.key != dataset.key

@@ -1,8 +1,7 @@
 """The Bode plot pans and zooms, and its two y axes move as one.
 
-|Z| and -phase live in separate ViewBoxes with independent scales. x is linked,
-but y cannot be: without _follow_magnitude_y a drag would slide the magnitude
-curve while the phase curve sat still.
+|Z| and -phase live in separate ViewBoxes with independent scales: x is linked,
+but y is carried by _follow_magnitude_y.
 """
 import os
 
@@ -49,8 +48,7 @@ def _ranges(widget):
 def test_the_magnitude_view_takes_the_mouse(plot):
     main, phase = _views(plot)
     assert main.mouseEnabled() == [True, True]
-    # The phase view is driven through the magnitude one, never directly --
-    # it sits under it and would otherwise swallow the drags.
+    # The phase view is driven through the magnitude one, never directly -- it sits under it and would swallow the drags.
     assert phase.mouseEnabled() == [False, False]
 
 
@@ -100,8 +98,7 @@ def test_a_point_keeps_its_screen_position_under_zoom(plot):
     def screen_fraction():
         (m0, m1) = main.viewRange()[1]
         (p0, p1) = phase.viewRange()[1]
-        # Where the midpoint of the original phase span now sits, and where a
-        # magnitude value at the same starting fraction sits.
+        # Where the midpoint of the original phase span now sits, and where a magnitude value at the same starting fraction sits.
         return ((p0 + p1) / 2 - p0) / (p1 - p0), ((m0 + m1) / 2 - m0) / (m1 - m0)
 
     before = screen_fraction()

@@ -17,10 +17,7 @@ class EISDataset:
         self._dataset = dataset
         self.index = index
         self.source_file = source_file
-        # Identifies which loaded file this sweep came from. Distinct from
-        # source_file (a filename stem, which two different files can share)
-        # -- it's what makes `key` unique when several files are open at
-        # once. Defaults to 0 for single-file callers (scripts, Streamlit).
+        # Which loaded file this sweep came from; distinct from source_file (a stem two files can share), and what makes `key` unique.
         self.file_id = file_id
 
     @property

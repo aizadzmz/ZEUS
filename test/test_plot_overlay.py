@@ -51,8 +51,7 @@ def _pane(width=1000, height=600, with_eraser=False):
 
 def _draw(pane, counts):
     pane.set_widget(build_nyquist_plot(_datasets(counts)))
-    # Twice: set_widget defers the first placement to a zero-timer, and the
-    # legend sizes itself on the layout pass that follows.
+    # Twice: set_widget defers the first placement to a zero-timer, and the legend sizes itself on the layout pass that follows.
     QApplication.processEvents()
     QApplication.processEvents()
 

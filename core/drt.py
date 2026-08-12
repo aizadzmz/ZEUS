@@ -3,10 +3,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-# pyimpspec is imported inside the run_* functions rather than here, and the
-# annotations below are strings thanks to the __future__ import. That is what
-# lets the GUI read the option tuples while building its sidebar without
-# paying ~4 s for pyimpspec (scipy.signal, sympy); see core/__init__.py.
+# pyimpspec is imported inside the run_* functions, so the GUI can read the option tuples below without paying its ~4 s import; see core/__init__.py.
 if TYPE_CHECKING:
     from pyimpspec.analysis.drt import TRRBFResult
     from pyimpspec.analysis.drt.peak_analysis import DRTPeaks

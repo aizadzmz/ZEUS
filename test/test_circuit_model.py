@@ -27,9 +27,7 @@ from core.circuit_model import (
 from core.ecm import CIRCUIT_PRESETS, canonical_cdc, run_ecm_fit
 from core.io_utils import EISDataset
 
-# Same synthetic spectrum as test_ecm.py and test_circuit_diagram.py: R0 plus two
-# parallel RC pairs, so a circuit assembled purely by edit actions below has a
-# known right answer to converge on.
+# Same synthetic spectrum as test_ecm.py and test_circuit_diagram.py: R0 plus two parallel RC pairs, so a circuit assembled by edit actions has a known answer to converge on.
 R0_TRUE, R1_TRUE, R2_TRUE = 10.0, 50.0, 30.0
 f = np.logspace(5, -1, 40)
 w = 2 * np.pi * f
@@ -60,9 +58,7 @@ def test_presets_round_trip(name, cdc):
     root = from_cdc(cdc)
     again = from_cdc(to_cdc(root))
     assert structure(again) == structure(root)
-    # The CDC the tree serializes to must describe the same circuit as the one
-    # it was parsed from -- this is what lets the canvas write back into the
-    # CDC field without changing what gets fitted.
+    # The CDC the tree serializes to must describe the same circuit it was parsed from -- what lets the canvas write back into the CDC field without changing the fit.
     assert canonical_cdc(to_cdc(root)) == canonical_cdc(cdc)
 
 
@@ -88,8 +84,7 @@ def test_empty_root_serializes_to_an_empty_code():
 
 
 def test_structure_of_a_nested_preset():
-    # R(C[RW]): a resistor in series with a parallel pair, one branch of which is
-    # itself a series connection.
+    # R(C[RW]): a resistor in series with a parallel pair, one branch of which is itself a series connection.
     assert structure(from_cdc("R(C[RW])")) == (
         "series",
         ("R", ("parallel", ("C", ("series", ("R", "W"))))),
@@ -187,8 +182,7 @@ def test_delete_collapses_a_single_branch_parallel():
     root = from_cdc("R(RC)")
     capacitor = next(n for n in elements(root) if n.symbol == "C")
     root = delete(root, capacitor.node_id)
-    # The parallel is meaningless with one branch left, so it folds into the
-    # series and the code becomes a plain RR.
+    # The parallel is meaningless with one branch left, so it folds into the series and the code becomes a plain RR.
     assert structure(root) == ("series", ("R", "R"))
     assert canonical_cdc(to_cdc(root)) == canonical_cdc("RR")
 
@@ -214,8 +208,7 @@ def test_delete_flattens_a_nested_series():
     root = from_cdc("R(C[RW])")
     capacitor = next(n for n in elements(root) if n.symbol == "C")
     root = delete(root, capacitor.node_id)
-    # (\[RW]) leaves one branch holding a series pair, which flattens all the way
-    # up into the outermost series rather than nesting [ [R W] ].
+    # (\[RW]) leaves one branch holding a series pair, which flattens all the way up rather than nesting [ [R W] ].
     assert structure(root) == ("series", ("R", "R", "W"))
     assert parse_cdc(to_cdc(root)) is not None
 
@@ -240,8 +233,7 @@ def test_replace_element_keeps_shared_parameters():
 
     replaced = first_element(root)
     assert replaced.symbol == "Ws"
-    # Ws shares Y and n with Q, so both carry over; its own B, which Q has no
-    # counterpart for, comes in at the Ws default.
+    # Ws shares Y and n with Q, so both carry over; its own B, which Q has no counterpart for, comes in at the Ws default.
     assert replaced.values["Y"] == pytest.approx(1.5e-3)
     assert replaced.values["n"] == pytest.approx(0.8)
     assert replaced.values["B"] == pytest.approx(new_element("Ws").values["B"])

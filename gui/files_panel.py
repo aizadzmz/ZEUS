@@ -21,9 +21,7 @@ from PySide6.QtWidgets import (
 from gui import style
 from gui.selection import SweepSelection
 
-# Past this many files, new loads come in collapsed: the point of collapsing is
-# to keep a multi-file batch scrollable, and a single file has nothing to hide
-# behind.
+# Past this many files, new loads come in collapsed; a single file has nothing to hide behind.
 COLLAPSE_ABOVE_FILE_COUNT = 1
 
 
@@ -35,14 +33,11 @@ class FilesAndSetsPanel(QWidget):
         super().__init__(parent)
         self._selection = selection
         self._stems: Dict[int, str] = {}
-        # File headers are items, not widgets, so they take their color here
-        # rather than from the stylesheet.
+        # File headers are items, not widgets, so they take their color here rather than from the stylesheet.
         self._mode = "light"
-        # Guards the model -> widget direction, so repopulating the tree does
-        # not echo every row back into the model as a user edit.
+        # Guards the model -> widget direction, so repopulating the tree does not echo rows back as user edits.
         self._syncing = False
-        # Survives rebuild(), which theme changes and every file load trigger;
-        # without it, switching theme would silently re-expand everything.
+        # Survives rebuild(), which theme changes and every file load trigger.
         self._collapsed_file_ids: set[int] = set()
 
         col = QVBoxLayout(self)
@@ -69,20 +64,16 @@ class FilesAndSetsPanel(QWidget):
         self.tree.setObjectName("filesList")
         self.tree.setHeaderHidden(True)
         self.tree.setRootIsDecorated(True)
-        # Rows are one line of text; uniform heights let the view skip
-        # measuring every item when a batch of files loads at once.
+        # Rows are one line of text; uniform heights let the view skip measuring every item on a batch load.
         self.tree.setUniformRowHeights(True)
         self.tree.setToolTip(
             "Which files/sets to display and run analyses over. Checking more "
             "sweeps means validation, DRT and circuit fitting all process more."
         )
         self.tree.itemChanged.connect(self._on_item_changed)
-        # Clicking a sweep's text (not its checkbox) moves the cursor there, so
-        # a sweep can be jumped to without paging with the `< >` strip.
+        # Clicking a sweep's text (not its checkbox) moves the cursor there, without paging with the `< >` strip.
         self.tree.currentItemChanged.connect(self._on_current_item_changed)
-        # Clicking a file's name checks or unchecks that whole file. Wired to
-        # the click rather than the item's own check state so that hitting the
-        # expand arrow does not also toggle 12 sweeps.
+        # Clicking a file's name checks or unchecks that whole file; wired to the click so hitting the expand arrow does not also toggle 12 sweeps.
         self.tree.itemClicked.connect(self._on_item_clicked)
         col.addWidget(self.tree, stretch=1)
 
@@ -101,8 +92,7 @@ class FilesAndSetsPanel(QWidget):
         for ds in self._selection.datasets:
             by_file[ds.file_id].append(ds)
 
-        # A fresh multi-file load starts collapsed; a file the user has already
-        # collapsed by hand stays that way.
+        # A fresh multi-file load starts collapsed; a file the user collapsed by hand stays that way.
         collapse_new = len(by_file) > COLLAPSE_ABOVE_FILE_COUNT
 
         for file_id, datasets in by_file.items():
@@ -111,9 +101,7 @@ class FilesAndSetsPanel(QWidget):
             file_item = QTreeWidgetItem(
                 [f"{stem}  ({count} sweep{'s' if count != 1 else ''})"]
             )
-            # Not user-checkable: its check state is a summary of the children,
-            # driven by _on_item_clicked, so Qt must not let a stray click on
-            # the indicator set it directly.
+            # Not user-checkable: its check state is a summary of the children, so Qt must not let a stray click set it directly.
             file_item.setFlags(Qt.ItemIsEnabled)
             file_item.setData(0, Qt.UserRole + 1, file_id)
             bold = file_item.font(0)
@@ -180,8 +168,7 @@ class FilesAndSetsPanel(QWidget):
     def set_files(self, files: List) -> None:
         """Supply the LoadedFile registry for the file headers, then rebuild."""
         self._stems = {lf.file_id: lf.stem for lf in files}
-        # Files that went away should not hold a collapsed state for whatever
-        # file_id gets handed out next.
+        # Files that went away should not hold a collapsed state for whatever file_id gets handed out next.
         live = {lf.file_id for lf in files}
         self._collapsed_file_ids &= live
         self.rebuild()
@@ -214,8 +201,7 @@ class FilesAndSetsPanel(QWidget):
         """A click anywhere on a file's row toggles all of its sweeps."""
         if self._syncing or item.parent() is not None:
             return
-        # Anything short of every sweep checked means the click turns the file
-        # on; only a fully checked file turns off.
+        # Anything short of every sweep checked means the click turns the file on; only a fully checked file turns off.
         turning_on = item.checkState(0) != Qt.Checked
         keys = [
             item.child(i).data(0, Qt.UserRole)
@@ -228,7 +214,6 @@ class FilesAndSetsPanel(QWidget):
         if self._syncing or item is None:
             return
         key = item.data(0, Qt.UserRole)
-        # Only sweeps being drawn can be paged to; checking one first would
-        # silently widen what the next analysis run covers.
+        # Only sweeps being drawn can be paged to; checking one first would silently widen the next analysis run.
         if key is not None and self._selection.is_checked(key):
             self._selection.set_cursor_key(key)
