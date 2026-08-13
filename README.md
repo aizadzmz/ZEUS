@@ -39,9 +39,9 @@ an interactive graphing tool thanks to PyQtGraph.
 
 ## Installation
 
-### Windows installer (recommended for end users)
+### Windows installer 
 
-Download the latest `ZEUS-<version>-setup.exe` from `installer/Output/` and run it. 
+Download the latest `ZEUS-<version>-setup.exe` from `installer/Output/` and run it, which can be found in Tags/Releases. 
 This installs a standalone build that does not require Python or coding.
 
 ### Running from source
