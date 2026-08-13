@@ -41,7 +41,7 @@ an interactive graphing tool thanks to PyQtGraph.
 
 ### Windows installer 
 
-Download the latest `ZEUS-<version>-setup.exe` from `installer/Output/` and run it, which can be found in Tags/Releases. 
+Download the latest `ZEUS-<version>-setup.exe` from Releases/Tags. 
 This installs a standalone build that does not require Python or coding.
 
 ### Running from source
@@ -106,8 +106,7 @@ uv run python -m gui.app
 1. Move to the **DRT** step.
 2. Choose a DRT method and basis function. Any irrelevant settings will be greyed out depending on which method is chosen. DRT is typically fitted to **Re + Im** but users may choose to only fit it to either one. Subtraction of diffusion tail is possible, however this option is still in BETA. Regularisation and RBF shape controls the appearance of the DRT plot. Very low regularisation parameter ,λ, will introduce a lot of ripples/noise while very high λ carries the risk of flattening the DRT peaks. On the other hand, RBF shape control sets how wide each basis function is: a narrower width resolves closely-spaced peaks more sharply but admits more noise, while a wider width smooths the distribution and can merge nearby peaks. Sampling is a Bayesian-specific setting which sets the number of HMC simulations.
 3. Once DRT is performed, a DRT plot will appear in the bottom right corner. Users can then scroll through the different sweeps or click **Multiple** in **Display Option** to view all sweeps superimposed.
-4. Use the detected peaks as a starting point for building an equivalent
-   circuit in the next step.
+4. Peak extraction collects and stores DRT information, which could be used for ECM. By default, **Peaks** is set to 0. This means that ZEUS will identify any local maximum as a peak, which could result to overfitting. In this current release, users will have to manually change **Peaks** to the number of peaks they see from the DRT curve. As a result, ZEUS will extract the largest peaks corresponding to the number selected by the user.
 
 ### ECM
 
