@@ -1578,26 +1578,39 @@ class MainWindow(QMainWindow):
             )
         self._refresh()
 
-    def _drt_inputs(self, datasets: List, detached: bool = False) -> List:
+    def _drt_inputs(self, datasets: List) -> List:
         """The sweeps the DRT sees, which are not necessarily the sweeps
-        themselves: the step's own inductive-tail mask and diffusion-tail
-        subtraction are applied to copies, so the shared mask stays put.
+        themselves.
 
-        `detached` guarantees copies whether or not that filter is on, for the
-        worker thread. The two filters compose in the order the spectrum is
-        read, the inductive points going first.
+        Every sweep's frequency column is first silently corrected to the
+        geometric progression it verifiably rounds, when one exists -- see
+        core.frequency_grid.regridded(). This has no user-facing control: it
+        only ever activates when the correction is self-verified (every
+        stored value reproduced by rounding the recovered grid back to the
+        precision it was exported at), so there is nothing to decide and
+        nothing to get wrong by always trying it. regridded() always returns
+        a copy, applied or not, which is what makes every path below safe for
+        the worker thread as well as a synchronous redraw.
+
+        After that, the step's own inductive-tail mask and diffusion-tail
+        subtraction are applied to copies too, so the shared mask stays put.
+        Composed in the order the spectrum is read: the frequency grid first
+        (it reassigns each point's frequency by its original index, so it
+        must run before any point is dropped), then the inductive points,
+        then the diffusion subtraction.
         """
-        from core.filtering import detached_copy, inductive_tail_removed
+        from core.filtering import inductive_tail_removed
+        from core.frequency_grid import regridded
+
+        datasets = [regridded(ds)[0] for ds in datasets]
 
         if self.drt_step.remove_inductive_check.isChecked():
             datasets = [inductive_tail_removed(ds) for ds in datasets]
-            detached = False  # already copies
-        # Always returns copies, which is why it settles `detached` too.
         if self.drt_step.subtract_diffusion_check.isChecked():
             return self._diffusion_applied(datasets)
         # Nothing was subtracted, so nothing is on record. Cleared rather than left alone: stale fits would be read as this batch's and double-count the tail.
         self._diffusion_shown = {}
-        return [detached_copy(ds) for ds in datasets] if detached else datasets
+        return datasets
 
     def _diffusion_applied(self, datasets: List) -> List:
         """The sweeps with a fitted diffusion tail subtracted, always as copies.
@@ -1795,7 +1808,7 @@ class MainWindow(QMainWindow):
         self._drt_run_total = len(selected)
         self._pending_drt_params = self._drt_record(params)
         self._drt_worker_errors = []
-        inputs = self._drt_inputs(selected, detached=True)
+        inputs = self._drt_inputs(selected)
         # A copy, not a reference: _diffusion_shown is rebuilt by every redraw while the pager stays live through a run, so one click on › would otherwise shrink it to that one sweep.
         self._pending_diffusion = dict(self._diffusion_shown)
         self._drt_worker = DRTWorker(runner, inputs, parent=self)
