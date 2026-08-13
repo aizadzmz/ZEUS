@@ -64,31 +64,30 @@ uv run python -m gui.app
 
 ### Import/Load Data
 
-1. Launch ZEUS. You'll land on the **Data Visualisation** step.
-2. Load your data:
+1. 1)	Upon launch, ZEUS will land on the **Data Visualisation** step.
+2. Load data:
 
    **(a)** Click **Clear All and Add Files…** or **Add Files…** and pick one or more `.mpt`,
    `.txt`, or `.csv` files.
-   - For a generic `.txt`/`.csv` file with unrecognised columns, a popup
+   - For a generic `.txt`/`.csv` file, a popup
      dialog will ask you to confirm which column is frequency, `Z'`,
      `Z''`, etc.
    - `.mpt` files containing multiple PEIS/GEIS sweeps (e.g. Modulo Bat
-     sequences) are split into one entry per sweep automatically.
+     sequences) are parsed automatically.
 
    **(b)** To continue a previous analysis, use **File → Open session…**
-   and pick a previously saved `.eisz` session file — this restores the
+   and pick a previously saved `.eisz` session file. This restores the
    loaded sweeps along with any validation/DRT/ECM results and filter
-   state you'd already computed.
+   state already computed.
 3. Use the **Active Dataset** list on the bottom right section to select which spectra to work on.
-   The Nyquist/Bode plots update to show the current selection.
 4. Adjust marker shape, marker size and line width if needed in the **Plot Options**.
 
 ### Validation
 
-1. Move to the **Validation** step by clicking on it.
-2. Removing inductive tail is recommended as ZEUS works best on non-inductive processes.
+1. Move to the **Validation** step by clicking on it in the progress bar.
+2. Removing inductive tail is recommended as ZEUS works best on non-inductive processeses.
 3. Choose between **Kramers-Kronig** or **Z-HIT** to see how consistent
-   each spectrum is with a linear, causal, stable system.\
+   each spectrum is with a linear, causal, stable system.
 4. Define residual as *ΔZ/|Z|* or *ΔZ'/Z'*.
 5. Choose from either **Basic** or **Advanced** threshold mode:
 

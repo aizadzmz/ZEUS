@@ -74,7 +74,8 @@ class DataVizStep(StepPage):
         plot_form.addRow("Style", marker_style)
 
         # A popup rather than rows here: the marker list is per loaded file, so it cannot be laid out until the files are known.
-        self.marker_style_button = QPushButton("Marker & line style…")
+        # "&&" so Qt renders a literal ampersand instead of eating it as a mnemonic.
+        self.marker_style_button = QPushButton("Marker && line style…")
         self.marker_style_button.setProperty("variant", "secondary")
         self.marker_style_button.setToolTip(
             "Choose the marker shape, marker size and line width."
