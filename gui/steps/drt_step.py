@@ -109,7 +109,7 @@ class DRTStep(StepPage):
         super().__init__(parent)
 
         # Plain tuples of option strings; core.drt keeps its pyimpspec imports inside its functions, so reading these stays free.
-        from core.drt import RBF_TYPES
+        from core.drt import MAX_PEAKS, RBF_TYPES
         from core.ecm import DIFFUSION_PRESETS
 
         # ---------------------------------------------------------- settings
@@ -374,8 +374,10 @@ class DRTStep(StepPage):
         self.timeout_spin.setValue(300)
         self.timeout_spin.setToolTip(
             "The Bayesian credible-interval sampler can be extremely slow "
-            "(tens of minutes for even modest sweeps). It aborts once this "
-            "many seconds pass; 0 disables the limit entirely."
+            "(tens of minutes for even modest sweeps). The run is stopped once "
+            "this many seconds pass, from outside if need be — the sampler can "
+            "reach a state it never leaves.\n\n"
+            "0 disables the limit, and then a stalled run has to be waited out."
         )
         form.addRow("Timeout [s]", self.timeout_spin)
         # After the last row: the labels addRow() builds from a string have no tooltip, so hovering one would show the card's instead.
@@ -417,10 +419,14 @@ class DRTStep(StepPage):
         peak_form.setVerticalSpacing(style.FORM_V_SPACING)
         self.num_peaks_spin = QSpinBox()
         self.num_peaks_spin.setMinimum(0)
-        self.num_peaks_spin.setMaximum(50)
+        # Capped at what the simultaneous fit can actually solve; see core.drt.
+        self.num_peaks_spin.setMaximum(MAX_PEAKS)
         self.num_peaks_spin.setValue(0)
         self.num_peaks_spin.setToolTip(
-            "Number of peaks to fit. 0 analyses every detected peak."
+            f"Number of peaks to fit, largest first. 0 analyses every detected "
+            f"peak. All of them are fitted in one go, so the limit is "
+            f"{MAX_PEAKS}; a distribution resolving more than that is usually "
+            f"fitting noise, and wants a larger λ."
         )
         peak_form.addRow("Peaks", self.num_peaks_spin)
         mirror_row_tooltips(peak_form)
@@ -495,6 +501,8 @@ class DRTStep(StepPage):
             control.toggled.connect(self._sync_relevance)
         self.rbf_combo.currentIndexChanged.connect(self._sync_relevance)
         self.cv_combo.currentIndexChanged.connect(self._sync_relevance)
+        # Decides whether the inductance row applies; see _sync_relevance.
+        self.mode_combo.currentIndexChanged.connect(self._sync_relevance)
         self.subtract_diffusion_check.toggled.connect(self._sync_relevance)
         self._sync_relevance()
 
@@ -514,6 +522,8 @@ class DRTStep(StepPage):
           are read only inside the credible-interval branch.
         - Piecewise-linear discretisation short-circuits _compute_epsilon to
           0.0, so rbf_shape and shape_coeff are discarded whatever they say.
+        - _prepare_real_matrices takes no inductance argument, so "Re only"
+          fits the same model whether or not the box is ticked.
         """
         form = self._form
 
@@ -527,6 +537,12 @@ class DRTStep(StepPage):
         shaped = self.rbf_combo.currentData() != "piecewise-linear"
         self._shape_header.setEnabled(shaped)
         set_row_enabled(form, self._shape_row, shaped)
+
+        # Left ticked but inert, rather than silently cleared: switching Fit to
+        # back restores the setting the user chose.
+        set_row_enabled(
+            form, self.inductance_check, self.mode_combo.currentData() != "real"
+        )
 
         # Not a pyimpspec rule but the same principle: neither the model nor the readout means anything with the filter off.
         subtracting = self.subtract_diffusion_check.isChecked()

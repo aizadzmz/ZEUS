@@ -156,6 +156,36 @@ def series_resistance(dataset) -> float:
     return ohmic_resistance(frequencies, dataset.impedances)
 
 
+def _element_term(symbol: str, **values) -> str:
+    """One element as CDC text, with a default limit widened wherever a value
+    read off the DRT falls outside it.
+
+    fit_circuit rejects an initial value outside its element's limits, so
+    without this the built circuit parses but cannot be fitted -- and the
+    limits are generic defaults, not physics: a slow peak with a small
+    resistance puts C = tau/R above the 1000 F ceiling on ordinary data.
+    """
+    from pyimpspec import parse_cdc
+
+    element = parse_cdc(symbol).get_elements()[0]
+    parts = []
+    for key, value in values.items():
+        lower = element.get_lower_limit(key)
+        upper = element.get_upper_limit(key)
+        if lower <= value <= upper:
+            parts.append(f"{key}={value:.6g}")
+            continue
+        # Only the side actually breached moves, by a decade, so the fit has
+        # room to leave the value it starts on. Scaling rather than offsetting
+        # keeps the sign: a negative floor under a capacitance means nothing.
+        if value > upper:
+            upper = value * 10 if value > 0 else value / 10
+        else:
+            lower = value / 10 if value > 0 else value * 10
+        parts.append(f"{key}={value:.6g}/{lower:.6g}/{upper:.6g}")
+    return f"{symbol}{{{','.join(parts)}}}"
+
+
 def circuit_from_drt_peaks(
     peaks,
     r_series: float,
@@ -183,14 +213,13 @@ def circuit_from_drt_peaks(
             f"Try a peak analysis with a different number of peaks."
         )
 
-    terms = [f"R{{R={r_series:.6g}}}"]
+    terms = [_element_term("R", R=r_series)]
     for tau, area in kept:
         if use_cpe:
-            admittance = tau**cpe_exponent / area
-            element = f"Q{{Y={admittance:.6g},n={cpe_exponent:.6g}}}"
+            element = _element_term("Q", Y=tau**cpe_exponent / area, n=cpe_exponent)
         else:
-            element = f"C{{C={tau / area:.6g}}}"
-        terms.append(f"(R{{R={area:.6g}}}{element})")
+            element = _element_term("C", C=tau / area)
+        terms.append(f"({_element_term('R', R=area)}{element})")
     return "".join(terms)
 
 
