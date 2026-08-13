@@ -49,7 +49,11 @@ This installs a standalone build that does not require Python or coding.
 Requires Python 3.12+.
 
 ```bash
+# clone the repo
+git clone https://github.com/aizadzmz/ZEUS.git
+
 # install dependencies (using uv, or substitute pip/venv as preferred)
+cd ZEUS
 uv sync
 
 # launch the app via terminal
