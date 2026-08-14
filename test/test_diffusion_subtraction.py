@@ -431,8 +431,17 @@ def window(app):
 
 
 def test_filter_off_leaves_the_drt_inputs_alone(window):
+    """Values, not identity: _drt_inputs always copies now, via the silent
+    frequency-grid correction that runs unconditionally ahead of this filter
+    (see core.frequency_grid.regridded, which returns a copy even when it
+    declines). FREQUENCIES here is full precision, so it always declines --
+    the diffusion filter being off is what this checks, and the data must
+    still come through unchanged."""
     selected = window._selected_datasets()
-    assert window._drt_inputs(selected) == selected
+    for before, after in zip(selected, window._drt_inputs(selected)):
+        assert np.array_equal(after.frequencies, before.frequencies)
+        assert np.array_equal(after.impedances, before.impedances)
+        assert after.data.get_mask() == before.data.get_mask()
 
 
 def test_filter_on_subtracts_from_every_drt_input(window):
@@ -453,7 +462,7 @@ def test_the_step_leaves_the_sweeps_the_other_steps_read_alone(window):
     before = [ds.impedances.copy() for ds in selected]
     window.drt_step.subtract_diffusion_check.setChecked(True)
 
-    window._drt_inputs(selected, detached=True)
+    window._drt_inputs(selected)
 
     assert all(np.array_equal(ds.impedances, was) for ds, was in zip(selected, before))
 

@@ -77,6 +77,18 @@ class ValidationStep(StepPage):
         valid_form.addRow("Method", method)
         self._form = valid_form
 
+        # Directly under the method it qualifies, and before the threshold rows: whichever convention is picked here is the one those limits are measured against.
+        definition = SegmentedControl(["ΔZ / |Z|", "ΔZ′ / Z′"])
+        self.residual_modulus_radio = definition.button(0)
+        self.residual_modulus_radio.setToolTip(
+            "Residuals defined as: ΔZ′/|Z| and ΔZ″/|Z|."
+        )
+        self.residual_component_radio = definition.button(1)
+        self.residual_component_radio.setToolTip(
+            "Residuals defined as: ΔZ′/Z′ and ΔZ″/Z″."
+        )
+        valid_form.addRow("Residuals", definition)
+
         mode = SegmentedControl(["Basic", "Advanced"])
         self.basic_radio = mode.button(0)
         self.basic_radio.setToolTip(
@@ -86,7 +98,7 @@ class ValidationStep(StepPage):
         self.advanced_radio.setToolTip(
             "Soft and Hard Limits"
         )
-        valid_form.addRow("Mode", mode)
+        valid_form.addRow("Threshold Mode", mode)
 
         self.threshold_spin = _percent_spin(2.0)
         self.threshold_spin.setToolTip(
@@ -117,18 +129,6 @@ class ValidationStep(StepPage):
             "to prevent crashing."
         )
         valid_form.addRow("Max removed", self.max_removed_spin)
-
-        # Last of the settings the run reads, and directly under the limits it governs: whichever convention is picked here is the one they reject on.
-        definition = SegmentedControl(["ΔZ / |Z|", "ΔZ′ / Z′"])
-        self.residual_modulus_radio = definition.button(0)
-        self.residual_modulus_radio.setToolTip(
-            "Residuals defined as: ΔZ′/|Z| and ΔZ″/|Z|."
-        )
-        self.residual_component_radio = definition.button(1)
-        self.residual_component_radio.setToolTip(
-            "Residuals defined as: ΔZ′/Z′ and ΔZ″/Z″."
-        )
-        valid_form.addRow("Residuals", definition)
 
         self.run_validation_button = QPushButton()
         # The one action this step exists to perform.
